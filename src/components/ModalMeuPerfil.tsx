@@ -75,8 +75,8 @@ export default function ModalMeuPerfil({
     }
 
     if (novaSenha.trim()) {
-      if (novaSenha.length < 4) {
-        setMensagem({ tipo: 'erro', texto: 'A nova senha deve ter no mínimo 4 caracteres.' });
+      if (novaSenha.trim().length < 6) {
+        setMensagem({ tipo: 'erro', texto: 'A nova senha deve ter no mínimo 6 caracteres (padrão Supabase Auth).' });
         return;
       }
       if (novaSenha !== confirmaNovaSenha) {
@@ -87,14 +87,17 @@ export default function ModalMeuPerfil({
 
     setLoading(true);
     try {
-      const payload: { nome: string; senha?: string; foto_url?: string | null } = {
+      if (novaSenha.trim()) {
+        const { error: authErr } = await supabase.auth.updateUser({
+          password: novaSenha.trim()
+        });
+        if (authErr) throw authErr;
+      }
+
+      const payload: { nome: string; foto_url?: string | null } = {
         nome: nome.trim(),
         foto_url: fotoUrl || null
       };
-
-      if (novaSenha.trim()) {
-        payload.senha = novaSenha.trim();
-      }
 
       const { error } = await supabase
         .from('operadores')
@@ -106,19 +109,8 @@ export default function ModalMeuPerfil({
       const operadorAtualizado = {
         ...operador,
         nome: payload.nome,
-        foto_url: payload.foto_url,
-        ...(payload.senha ? { senha: payload.senha } : {})
+        foto_url: payload.foto_url
       };
-
-      // Atualiza no localStorage
-      try {
-        const sessaoRaw = localStorage.getItem('infport_sessao_operador');
-        if (sessaoRaw) {
-          const sessao = JSON.parse(sessaoRaw);
-          sessao.operador = operadorAtualizado;
-          localStorage.setItem('infport_sessao_operador', JSON.stringify(sessao));
-        }
-      } catch {}
 
       if (onOperadorAtualizado) {
         onOperadorAtualizado(operadorAtualizado);
@@ -130,7 +122,7 @@ export default function ModalMeuPerfil({
       setMensagem({ 
         tipo: 'sucesso', 
         texto: novaSenha.trim() 
-          ? 'Foto, dados e senha atualizados com sucesso no banco de dados!' 
+          ? 'Foto, dados e senha atualizados com segurança no Supabase Auth!' 
           : 'Foto de perfil e dados atualizados com sucesso!' 
       });
     } catch (err: any) {

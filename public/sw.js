@@ -9,10 +9,8 @@
  * 3. Cache Storage Segregado: Permite purga seletiva de versões antigas sem perder cache de fotos.
  */
 
-const CACHE_APP_SHELL = 'porttohub-shell-v4';
-const CACHE_ESTATICOS_ASSETS = 'porttohub-assets-v4';
-const CACHE_IMAGENS = 'porttohub-images-v4';
-const CACHE_DINAMICO = 'porttohub-runtime-v4';
+const CACHE_APP_SHELL = 'porttohub-shell-v6';
+const CACHE_ESTATICOS_ASSETS = 'porttohub-assets-v6';
 
 const ASSETS_ESSENCIAIS = [
   '/',
@@ -41,13 +39,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
-          if (
-            key !== CACHE_APP_SHELL && 
-            key !== CACHE_ESTATICOS_ASSETS && 
-            key !== CACHE_IMAGENS && 
-            key !== CACHE_DINAMICO
-          ) {
-            console.log('[SW] Purgando cache legado:', key);
+          if (key !== CACHE_APP_SHELL && key !== CACHE_ESTATICOS_ASSETS) {
             return caches.delete(key);
           }
         })
@@ -60,48 +52,36 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
 
-  // Não intercepta WebSockets nem módulos de desenvolvimento Vite (.tsx, .ts, /src/, /@vite, /api/)
+  // Nunca intercepta/cacheia Auth, API, Supabase REST/Storage, URLs assinadas ou módulos Vite dev
   if (
-    url.protocol === 'ws:' || 
+    url.protocol === 'ws:' ||
     url.protocol === 'wss:' ||
+    url.hostname.includes('supabase.co') ||
     url.pathname.startsWith('/src/') ||
     url.pathname.startsWith('/@') ||
     url.pathname.startsWith('/node_modules/') ||
     url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/auth') ||
+    url.pathname.includes('/storage/v1/') ||
+    url.searchParams.has('token') ||
     /\.(tsx?|jsx|mjs)$/i.test(url.pathname)
   ) {
     return;
   }
 
-  // 1. NETWORK-FIRST ESTRITO: Rotas de autenticação e verificação de versão para OTA Instantâneo
-  const ehRotaCriticaAuthOuVersao = 
-    url.pathname === '/version.json' || 
-    url.pathname.startsWith('/auth') || 
-    url.pathname.startsWith('/api/auth') ||
-    url.searchParams.has('ts');
-
-  if (ehRotaCriticaAuthOuVersao) {
-    event.respondWith(
-      fetch(event.request)
-        .then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            const copia = networkResponse.clone();
-            caches.open(CACHE_DINAMICO).then((c) => c.put(event.request, copia));
-          }
-          return networkResponse;
-        })
-        .catch(() => caches.match(event.request))
-    );
+  // Checagem de versão: sempre network-first sem persistir respostas privadas
+  if (url.pathname === '/version.json' || url.searchParams.has('ts')) {
+    event.respondWith(fetch(event.request));
     return;
   }
 
-  // 2. STALE-WHILE-REVALIDATE PARA SCRIPTS JS, CSS E FONTES
-  // Entrega imediata em 0ms do cache local com atualização invisível em background
-  const ehScriptOuCssOuFonte = 
-    /\.(js|css|woff2?|ttf|eot)$/i.test(url.pathname) ||
-    url.pathname.startsWith('/assets/');
+  // Scripts JS, CSS, fontes e imagens estáticas públicas do próprio domínio (não Storage privado)
+  const ehAssetEstaticoPublico =
+    url.origin === self.location.origin &&
+    (/\.(js|css|woff2?|ttf|eot|png|jpe?g|webp|svg|ico)$/i.test(url.pathname) ||
+      url.pathname.startsWith('/assets/'));
 
-  if (ehScriptOuCssOuFonte) {
+  if (ehAssetEstaticoPublico) {
     event.respondWith(
       caches.open(CACHE_ESTATICOS_ASSETS).then((cache) => {
         return cache.match(event.request).then((cachedResponse) => {
@@ -114,79 +94,27 @@ self.addEventListener('fetch', (event) => {
             })
             .catch(() => null);
 
-          // Se tem cache, entrega na hora (0ms!) e atualiza cache em paralelo
-          if (cachedResponse) {
-            return cachedResponse;
-          }
-
-          // Se ainda não estava no cache, aguarda a rede
-          return fetchPromise.then((res) => res || cachedResponse);
+          return cachedResponse || fetchPromise.then((res) => res || cachedResponse);
         });
       })
     );
     return;
   }
 
-  // 3. STALE-WHILE-REVALIDATE PARA IMAGENS DOS CARDS & STORAGE
-  const ehImagem = 
-    event.request.destination === 'image' ||
-    url.pathname.includes('/storage/v1/object/public/') ||
-    /\.(png|jpe?g|webp|svg|gif|avif|ico)$/i.test(url.pathname);
-
-  if (ehImagem) {
-    event.respondWith(
-      caches.open(CACHE_IMAGENS).then((cache) => {
-        return cache.match(event.request).then((cachedResponse) => {
-          const revalidacaoRede = fetch(event.request)
-            .then((networkResponse) => {
-              if (networkResponse && (networkResponse.status === 200 || networkResponse.type === 'opaque')) {
-                cache.put(event.request, networkResponse.clone());
-              }
-              return networkResponse;
-            })
-            .catch(() => null);
-
-          if (cachedResponse) {
-            return cachedResponse;
-          }
-
-          return revalidacaoRede.then((res) => res || caches.match('/icon.svg'));
-        });
-      })
-    );
-    return;
-  }
-
-  // 4. ESTRATÉGIA PARA CONSULTAS DO SUPABASE (REST / PostgREST)
-  // O SDK do Supabase e o nosso IndexedDB / deltaSyncService gerenciam o banco de dados
-  if (url.hostname.includes('supabase.co')) {
-    return;
-  }
-
-  // 5. NAVEGAÇÃO SPA (index.html Shell): Network-first com fallback instantâneo para App Shell em cache
+  // Navegação SPA (index.html Shell): Network-first com fallback para App Shell
   if (event.request.mode === 'navigate' || event.request.headers.get('accept')?.includes('text/html')) {
     event.respondWith(
       fetch(event.request)
         .then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
+          if (networkResponse && networkResponse.status === 200 && url.origin === self.location.origin) {
             const copia = networkResponse.clone();
             caches.open(CACHE_APP_SHELL).then((c) => c.put('/', copia));
           }
           return networkResponse;
         })
-        .catch(() => {
-          return caches.match('/') || caches.match('/index.html');
-        })
+        .catch(() => caches.match('/') || caches.match('/index.html'))
     );
-    return;
   }
-
-  // Fallback padrão para demais requisições
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return cached || fetch(event.request);
-    })
-  );
 });
 
 self.addEventListener('message', (event) => {

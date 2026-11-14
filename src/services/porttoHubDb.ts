@@ -1,17 +1,18 @@
 /**
- * PorttoHub — Banco de Dados Local-First no Cliente (IndexedDB)
- * 
- * ARQUITETURA DE PERFORMANCE ULTRA-RÁPIDA (0ms):
- * - Persistência assíncrona de alta capacidade no dispositivo do operador.
- * - Desacoplamento da UI: Leitura em 0ms sem bloquear o event loop (ao contrário do localStorage).
- * - Suporta milhares de encomendas, moradores, veículos, custódias e registros de acesso.
- * - Suporte a índices compostos para queries multi-tenant instantâneas.
+ * PorttoHub — Banco de Dados Local-First no Cliente (IndexedDB v2)
+ *
+ * ARQUITETURA MULTI-TENANT SEGURA:
+ * - Stores operacionais usam chave primária composta ['condominio_id', 'id']
+ *   para isolar fisicamente registros entre condomínios.
+ * - Rejeita consultas sem condominio_id válido ('todos', 'global', vazio).
+ * - Store dedicada `offline_queue` para persistir operações pendentes com
+ *   idempotência (operation_id), operador_id e estado de sincronização.
  */
 
 export const PORTTOHUB_DB_NAME = 'PorttoHub_LocalFirst_DB';
-export const PORTTOHUB_DB_VERSION = 1;
+export const PORTTOHUB_DB_VERSION = 2;
 
-export type NomeTabelaLocal = 
+export type NomeTabelaLocal =
   | 'encomendas_itens'
   | 'custodia'
   | 'moradores'
@@ -21,7 +22,8 @@ export type NomeTabelaLocal =
   | 'bancada_volumes'
   | 'chaves'
   | 'registros_acesso'
-  | 'sync_metadata';
+  | 'sync_metadata'
+  | 'offline_queue';
 
 export interface SyncMetadataRecord {
   store_and_condo: string; // Chave primária: ex "${tabela}_${condominioId}"
@@ -32,15 +34,98 @@ export interface SyncMetadataRecord {
   lastFullSync: string;
 }
 
+const TENANT_COMPOSITE_STORES: ReadonlySet<NomeTabelaLocal> = new Set([
+  'encomendas_itens',
+  'custodia',
+  'moradores',
+  'veiculos',
+  'unidades',
+  'bancada_volumes',
+  'chaves',
+  'registros_acesso'
+]);
+
+function isCondominioIdDbValido(id?: string | null): boolean {
+  if (!id || typeof id !== 'string') return false;
+  const limpo = id.trim().toLowerCase();
+  return Boolean(limpo && limpo !== 'todos' && limpo !== 'global' && limpo !== 'null' && limpo !== 'undefined');
+}
+
+function criarStoreComIndices(db: IDBDatabase, storeName: NomeTabelaLocal): IDBObjectStore {
+  if (storeName === 'regras_horarios') {
+    const store = db.createObjectStore('regras_horarios', { keyPath: 'condominio_id' });
+    store.createIndex('updated_at', 'updated_at', { unique: false });
+    return store;
+  }
+
+  if (storeName === 'sync_metadata') {
+    return db.createObjectStore('sync_metadata', { keyPath: 'store_and_condo' });
+  }
+
+  if (storeName === 'offline_queue') {
+    const store = db.createObjectStore('offline_queue', { keyPath: 'operation_id' });
+    store.createIndex('condominio_id', 'condominio_id', { unique: false });
+    store.createIndex('operador_id', 'operador_id', { unique: false });
+    store.createIndex('estado', 'estado', { unique: false });
+    store.createIndex('criadoEm', 'criadoEm', { unique: false });
+    return store;
+  }
+
+  // Stores multi-tenant usam chave primária composta ['condominio_id', 'id']
+  const store = db.createObjectStore(storeName, { keyPath: ['condominio_id', 'id'] });
+  store.createIndex('condominio_id', 'condominio_id', { unique: false });
+
+  if (storeName === 'encomendas_itens') {
+    store.createIndex('status', 'status', { unique: false });
+    store.createIndex('unidade_bloco', 'unidade_bloco', { unique: false });
+    store.createIndex('created_at', 'created_at', { unique: false });
+    store.createIndex('updated_at', 'updated_at', { unique: false });
+    store.createIndex('condo_status', ['condominio_id', 'status'], { unique: false });
+    store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+  } else if (storeName === 'custodia') {
+    store.createIndex('status', 'status', { unique: false });
+    store.createIndex('created_at', 'created_at', { unique: false });
+    store.createIndex('updated_at', 'updated_at', { unique: false });
+    store.createIndex('condo_status', ['condominio_id', 'status'], { unique: false });
+    store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+  } else if (storeName === 'moradores') {
+    store.createIndex('unidade', 'unidade', { unique: false });
+    store.createIndex('bloco', 'bloco', { unique: false });
+    store.createIndex('veiculo_placa', 'veiculo_placa', { unique: false });
+    store.createIndex('condo_unidade', ['condominio_id', 'unidade'], { unique: false });
+    store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+  } else if (storeName === 'veiculos') {
+    store.createIndex('placa', 'placa', { unique: false });
+    store.createIndex('unidade_bloco', 'unidade_bloco', { unique: false });
+    store.createIndex('condo_placa', ['condominio_id', 'placa'], { unique: false });
+  } else if (storeName === 'unidades') {
+    store.createIndex('unidade', 'unidade', { unique: false });
+    store.createIndex('bloco', 'bloco', { unique: false });
+  } else if (storeName === 'bancada_volumes') {
+    store.createIndex('status', 'status', { unique: false });
+    store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+  } else if (storeName === 'chaves') {
+    store.createIndex('numero', 'numero', { unique: false });
+    store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+  } else if (storeName === 'registros_acesso') {
+    store.createIndex('status', 'status', { unique: false });
+    store.createIndex('data_hora_entrada', 'data_hora_entrada', { unique: false });
+    store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+  }
+
+  return store;
+}
+
 let dbInstancia: IDBDatabase | null = null;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
-// Fallback in-memory para ambientes onde IndexedDB estiver desabilitado (ex: modo anônimo restrito)
+// Fallback in-memory para ambientes onde IndexedDB estiver desabilitado
 const memoriaFallback = new Map<string, any[]>();
 const memoriaMetadataFallback = new Map<string, SyncMetadataRecord>();
+let memoriaOfflineQueue: any[] = [];
 
 /**
- * Abre e inicializa a conexão com o IndexedDB do PorttoHub
+ * Abre e inicializa a conexão com o IndexedDB v2 do PorttoHub
  */
 export function abrirPorttoHubDb(): Promise<IDBDatabase> {
   if (dbInstancia) {
@@ -59,93 +144,59 @@ export function abrirPorttoHubDb(): Promise<IDBDatabase> {
       const request = window.indexedDB.open(PORTTOHUB_DB_NAME, PORTTOHUB_DB_VERSION);
 
       request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
-        const db = (event.target as IDBOpenDBRequest).result;
+        const req = event.target as IDBOpenDBRequest;
+        const db = req.result;
+        const tx = req.transaction;
+        const oldVersion = event.oldVersion || 0;
 
-        // 1. Encomendas Itens
-        if (!db.objectStoreNames.contains('encomendas_itens')) {
-          const store = db.createObjectStore('encomendas_itens', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('status', 'status', { unique: false });
-          store.createIndex('unidade_bloco', 'unidade_bloco', { unique: false });
-          store.createIndex('created_at', 'created_at', { unique: false });
-          store.createIndex('updated_at', 'updated_at', { unique: false });
-          store.createIndex('condo_status', ['condominio_id', 'status'], { unique: false });
-          store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
+        // Migra todas as stores multi-tenant para keyPath composto ['condominio_id', 'id'] na v2
+        for (const storeName of TENANT_COMPOSITE_STORES) {
+          if (!db.objectStoreNames.contains(storeName)) {
+            criarStoreComIndices(db, storeName);
+          } else if (oldVersion < 2 && tx) {
+            try {
+              const oldStore = tx.objectStore(storeName);
+              const jaComposta = Array.isArray(oldStore.keyPath) &&
+                oldStore.keyPath[0] === 'condominio_id' &&
+                oldStore.keyPath[1] === 'id';
+
+              if (!jaComposta) {
+                const reqAll = oldStore.getAll();
+                reqAll.onsuccess = () => {
+                  const registrosAntigos = Array.isArray(reqAll.result) ? reqAll.result : [];
+                  const validos = registrosAntigos.filter(
+                    (it: any) =>
+                      it &&
+                      it.id !== undefined &&
+                      it.id !== null &&
+                      isCondominioIdDbValido(it.condominio_id)
+                  );
+                  db.deleteObjectStore(storeName);
+                  const novaStore = criarStoreComIndices(db, storeName);
+                  for (const item of validos) {
+                    try {
+                      novaStore.put(item);
+                    } catch {
+                      // Descarta registro incompatível na migração
+                    }
+                  }
+                };
+              }
+            } catch {
+              db.deleteObjectStore(storeName);
+              criarStoreComIndices(db, storeName);
+            }
+          }
         }
 
-        // 2. Custódia
-        if (!db.objectStoreNames.contains('custodia')) {
-          const store = db.createObjectStore('custodia', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('status', 'status', { unique: false });
-          store.createIndex('created_at', 'created_at', { unique: false });
-          store.createIndex('updated_at', 'updated_at', { unique: false });
-          store.createIndex('condo_status', ['condominio_id', 'status'], { unique: false });
-          store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
-        }
-
-        // 3. Moradores
-        if (!db.objectStoreNames.contains('moradores')) {
-          const store = db.createObjectStore('moradores', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('unidade', 'unidade', { unique: false });
-          store.createIndex('bloco', 'bloco', { unique: false });
-          store.createIndex('veiculo_placa', 'veiculo_placa', { unique: false });
-          store.createIndex('condo_unidade', ['condominio_id', 'unidade'], { unique: false });
-          store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
-        }
-
-        // 4. Veículos
-        if (!db.objectStoreNames.contains('veiculos')) {
-          const store = db.createObjectStore('veiculos', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('placa', 'placa', { unique: false });
-          store.createIndex('unidade_bloco', 'unidade_bloco', { unique: false });
-          store.createIndex('condo_placa', ['condominio_id', 'placa'], { unique: false });
-        }
-
-        // 5. Unidades Cadastradas / Estrutura
-        if (!db.objectStoreNames.contains('unidades')) {
-          const store = db.createObjectStore('unidades', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('unidade', 'unidade', { unique: false });
-          store.createIndex('bloco', 'bloco', { unique: false });
-        }
-
-        // 6. Regras de Horários (Obras / Mudanças)
         if (!db.objectStoreNames.contains('regras_horarios')) {
-          const store = db.createObjectStore('regras_horarios', { keyPath: 'condominio_id' });
-          store.createIndex('updated_at', 'updated_at', { unique: false });
+          criarStoreComIndices(db, 'regras_horarios');
         }
-
-        // 7. Bancada Volumes
-        if (!db.objectStoreNames.contains('bancada_volumes')) {
-          const store = db.createObjectStore('bancada_volumes', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('status', 'status', { unique: false });
-          store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
-        }
-
-        // 8. Claviculário / Chaves
-        if (!db.objectStoreNames.contains('chaves')) {
-          const store = db.createObjectStore('chaves', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('numero', 'numero', { unique: false });
-          store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
-        }
-
-        // 9. Registros de Acesso Portaria
-        if (!db.objectStoreNames.contains('registros_acesso')) {
-          const store = db.createObjectStore('registros_acesso', { keyPath: 'id' });
-          store.createIndex('condominio_id', 'condominio_id', { unique: false });
-          store.createIndex('status', 'status', { unique: false });
-          store.createIndex('data_hora_entrada', 'data_hora_entrada', { unique: false });
-          store.createIndex('condo_updated', ['condominio_id', 'updated_at'], { unique: false });
-        }
-
-        // 10. Metadados de Sincronização Delta
         if (!db.objectStoreNames.contains('sync_metadata')) {
-          db.createObjectStore('sync_metadata', { keyPath: 'store_and_condo' });
+          criarStoreComIndices(db, 'sync_metadata');
+        }
+        if (!db.objectStoreNames.contains('offline_queue')) {
+          criarStoreComIndices(db, 'offline_queue');
         }
       };
 
@@ -161,10 +212,12 @@ export function abrirPorttoHubDb(): Promise<IDBDatabase> {
 
       request.onerror = (event: Event) => {
         console.warn('[IndexedDB] Erro ao abrir banco de dados local:', (event.target as IDBOpenDBRequest).error);
+        dbPromise = null;
         reject((event.target as IDBOpenDBRequest).error);
       };
     } catch (err) {
       console.warn('[IndexedDB] Exceção ao inicializar banco local:', err);
+      dbPromise = null;
       reject(err);
     }
   });
@@ -173,64 +226,72 @@ export function abrirPorttoHubDb(): Promise<IDBDatabase> {
 }
 
 /**
- * Lê todos os registros de uma tabela local filtrados por condomínio (0ms)
+ * Lê todos os registros de uma tabela local filtrados estritamente por condomínio
  */
 export async function obterTodosItensLocal<T = any>(
   storeName: NomeTabelaLocal,
   condominioId: string
 ): Promise<T[]> {
+  if (TENANT_COMPOSITE_STORES.has(storeName) && !isCondominioIdDbValido(condominioId)) {
+    return [];
+  }
+
   try {
     const db = await abrirPorttoHubDb();
     return new Promise<T[]>((resolve) => {
       const tx = db.transaction(storeName, 'readonly');
       const store = tx.objectStore(storeName);
 
-      // Se a store tiver índice por condomínio, faz query filtrada
-      if (store.indexNames.contains('condominio_id') && condominioId && condominioId !== 'todos' && condominioId !== 'global') {
+      if (store.indexNames.contains('condominio_id') && isCondominioIdDbValido(condominioId)) {
         const index = store.index('condominio_id');
         const req = index.getAll(IDBKeyRange.only(condominioId));
-        req.onsuccess = () => resolve((req.result || []) as T[]);
-        req.onerror = () => {
-          // Fallback para getAll completo e filtro em memória
-          const reqAll = store.getAll();
-          reqAll.onsuccess = () => {
-            const todos = reqAll.result || [];
-            resolve(todos.filter((it: any) => it.condominio_id === condominioId) as T[]);
-          };
-          reqAll.onerror = () => resolve([]);
+        req.onsuccess = () => {
+          const lista = (req.result || []).filter((it: any) => String(it?.condominio_id || '') === String(condominioId));
+          resolve(lista as T[]);
         };
-      } else {
+        req.onerror = () => resolve([]);
+      } else if (!TENANT_COMPOSITE_STORES.has(storeName)) {
         const req = store.getAll();
         req.onsuccess = () => {
           let lista = req.result || [];
-          if (condominioId && condominioId !== 'todos' && condominioId !== 'global') {
-            lista = lista.filter((it: any) => it.condominio_id === condominioId);
+          if (isCondominioIdDbValido(condominioId)) {
+            lista = lista.filter((it: any) => String(it?.condominio_id || '') === String(condominioId));
           }
           resolve(lista as T[]);
         };
         req.onerror = () => resolve([]);
+      } else {
+        resolve([]);
       }
     });
-  } catch (err) {
-    // Fallback gracioso para memória
+  } catch {
+    if (!isCondominioIdDbValido(condominioId)) return [];
     const chave = `${storeName}_${condominioId}`;
     return (memoriaFallback.get(chave) || []) as T[];
   }
 }
 
 /**
- * Lê um único registro por chave primária
+ * Lê um único registro por chave primária (composta por [condominioId, id] em stores multi-tenant)
  */
 export async function obterItemPorIdLocal<T = any>(
   storeName: NomeTabelaLocal,
-  id: string | number
+  id: string | number,
+  condominioId?: string
 ): Promise<T | null> {
+  if (TENANT_COMPOSITE_STORES.has(storeName) && !isCondominioIdDbValido(condominioId)) {
+    return null;
+  }
+
   try {
     const db = await abrirPorttoHubDb();
     return new Promise<T | null>((resolve) => {
       const tx = db.transaction(storeName, 'readonly');
       const store = tx.objectStore(storeName);
-      const req = store.get(id);
+      const chave = TENANT_COMPOSITE_STORES.has(storeName)
+        ? [String(condominioId).trim(), id]
+        : id;
+      const req = store.get(chave as IDBValidKey);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
@@ -240,12 +301,18 @@ export async function obterItemPorIdLocal<T = any>(
 }
 
 /**
- * Salva um item individual no banco local
+ * Salva um item individual no banco local respeitando isolamento multi-tenant
  */
 export async function salvarItemLocal<T extends { id?: any; condominio_id?: string }>(
   storeName: NomeTabelaLocal,
   item: T
 ): Promise<void> {
+  if (TENANT_COMPOSITE_STORES.has(storeName)) {
+    if (!item || item.id === undefined || item.id === null || !isCondominioIdDbValido(item.condominio_id)) {
+      return;
+    }
+  }
+
   try {
     const db = await abrirPorttoHubDb();
     return new Promise<void>((resolve, reject) => {
@@ -255,8 +322,8 @@ export async function salvarItemLocal<T extends { id?: any; condominio_id?: stri
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-  } catch (err) {
-    if (item.condominio_id) {
+  } catch {
+    if (isCondominioIdDbValido(item.condominio_id)) {
       const chave = `${storeName}_${item.condominio_id}`;
       const lista = memoriaFallback.get(chave) || [];
       const idx = lista.findIndex((it: any) => String(it.id) === String(item.id));
@@ -268,18 +335,38 @@ export async function salvarItemLocal<T extends { id?: any; condominio_id?: stri
 }
 
 /**
- * Exclui um registro do banco local
+ * Exclui um registro do banco local respeitando chave composta [condominio_id, id]
  */
 export async function excluirItemLocal(
   storeName: NomeTabelaLocal,
-  id: string | number
+  id: string | number,
+  condominioId?: string
 ): Promise<void> {
   try {
     const db = await abrirPorttoHubDb();
     return new Promise<void>((resolve, reject) => {
       const tx = db.transaction(storeName, 'readwrite');
       const store = tx.objectStore(storeName);
-      store.delete(id);
+
+      if (TENANT_COMPOSITE_STORES.has(storeName)) {
+        if (isCondominioIdDbValido(condominioId)) {
+          store.delete([String(condominioId).trim(), id]);
+        } else {
+          // Fallback seguro por cursor quando chamador legado não passou condominioId
+          const cursorReq = store.openCursor();
+          cursorReq.onsuccess = (ev: any) => {
+            const cursor = ev.target.result as IDBCursorWithValue | null;
+            if (!cursor) return;
+            if (String(cursor.value?.id) === String(id)) {
+              cursor.delete();
+            }
+            cursor.continue();
+          };
+        }
+      } else {
+        store.delete(id);
+      }
+
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -289,7 +376,7 @@ export async function excluirItemLocal(
 }
 
 /**
- * Salva um lote inteiro de registros em uma única transação atômica (Ultra-Rápido)
+ * Salva um lote inteiro de registros em uma única transação atômica isolada por condomínio
  */
 export async function salvarLoteItensLocal<T = any>(
   storeName: NomeTabelaLocal,
@@ -299,11 +386,17 @@ export async function salvarLoteItensLocal<T = any>(
   substituirTodos: boolean = false
 ): Promise<void> {
   if (!itens || (itens.length === 0 && !substituirTodos)) return;
+  if (TENANT_COMPOSITE_STORES.has(storeName) && !isCondominioIdDbValido(condominioId)) {
+    return;
+  }
 
-  const itensValidos =
-    condominioId && condominioId !== 'todos' && condominioId !== 'global'
-      ? itens.filter((it: any) => !it?.condominio_id || String(it.condominio_id) === String(condominioId))
-      : itens;
+  const itensValidos = (itens || [])
+    .filter((it: any) => it && it.id !== undefined && it.id !== null)
+    .map((it: any) => ({
+      ...it,
+      condominio_id: it.condominio_id || condominioId
+    }))
+    .filter((it: any) => String(it.condominio_id) === String(condominioId));
 
   if (itensValidos.length === 0 && !substituirTodos) return;
 
@@ -314,7 +407,6 @@ export async function salvarLoteItensLocal<T = any>(
       const store = tx.objectStore(storeName);
 
       if (substituirTodos && store.indexNames.contains('condominio_id')) {
-        // Se for substituição completa do condomínio, limpa os antigos deste tenant
         const index = store.index('condominio_id');
         const reqKeys = index.getAllKeys(IDBKeyRange.only(condominioId));
         reqKeys.onsuccess = () => {
@@ -401,9 +493,54 @@ export async function salvarMetadataSyncLocal(
 }
 
 /**
- * Limpa todo o cache local de um condomínio específico (ex: ao trocar de condomínio)
+ * Espelha a fila offline de forma durável na store `offline_queue` do IndexedDB
+ */
+export async function salvarFilaOfflineIndexedDb(acoes: any[]): Promise<void> {
+  memoriaOfflineQueue = Array.isArray(acoes) ? [...acoes] : [];
+  try {
+    const db = await abrirPorttoHubDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('offline_queue', 'readwrite');
+      const store = tx.objectStore('offline_queue');
+      store.clear();
+      for (const acao of memoriaOfflineQueue) {
+        const item = {
+          ...acao,
+          operation_id: acao.operation_id || acao.id
+        };
+        if (item.operation_id) {
+          store.put(item);
+        }
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Fallback em memória já atualizado acima
+  }
+}
+
+export async function lerFilaOfflineIndexedDb(): Promise<any[]> {
+  try {
+    const db = await abrirPorttoHubDb();
+    return new Promise<any[]>((resolve) => {
+      const tx = db.transaction('offline_queue', 'readonly');
+      const store = tx.objectStore('offline_queue');
+      const req = store.getAll();
+      req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+      req.onerror = () => resolve(memoriaOfflineQueue);
+    });
+  } catch {
+    return memoriaOfflineQueue;
+  }
+}
+
+/**
+ * Limpa todo o cache de leitura local de um condomínio específico (preserva offline_queue)
  */
 export async function limparCacheLocalCondominio(condominioId: string): Promise<void> {
+  if (!isCondominioIdDbValido(condominioId)) return;
+
   try {
     const db = await abrirPorttoHubDb();
     const tabelas: NomeTabelaLocal[] = [
@@ -435,5 +572,37 @@ export async function limparCacheLocalCondominio(condominioId: string): Promise<
     }
   } catch (err) {
     console.warn('[IndexedDB] Erro ao limpar cache do condomínio:', err);
+  }
+}
+
+/**
+ * Limpa apenas os caches de leitura de TODOS os condomínios no IndexedDB (ex: logout),
+ * mantendo intacta a store `offline_queue` para não perder registros pendentes da portaria.
+ */
+export async function limparTodosCachesLeituraIndexedDb(): Promise<void> {
+  memoriaFallback.clear();
+  memoriaMetadataFallback.clear();
+  try {
+    const db = await abrirPorttoHubDb();
+    const tabelasLeitura: NomeTabelaLocal[] = [
+      'encomendas_itens',
+      'custodia',
+      'moradores',
+      'veiculos',
+      'unidades',
+      'regras_horarios',
+      'bancada_volumes',
+      'chaves',
+      'registros_acesso',
+      'sync_metadata'
+    ];
+    for (const tab of tabelasLeitura) {
+      if (db.objectStoreNames.contains(tab)) {
+        const tx = db.transaction(tab, 'readwrite');
+        tx.objectStore(tab).clear();
+      }
+    }
+  } catch {
+    // Ignora se IndexedDB não disponível
   }
 }

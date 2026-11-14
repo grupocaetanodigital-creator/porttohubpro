@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../services/supabase';
-import ModalLeitorDocumentoOCR from '../components/ModalLeitorDocumentoOCR';
 import { registrarAtividade } from '../services/auditoriaService';
 import { comprimirImagemBase64 } from '../services/imageUtils';
 import { ImagemOtimizada } from '../components/ImagemOtimizada';
@@ -22,8 +21,7 @@ import {
   X, 
   Search, 
   Plus, 
-  Camera, 
-  Scan, 
+  Camera,
   LogIn, 
   LogOut, 
   Phone, 
@@ -177,7 +175,6 @@ export default function PrestadoresObras({ usuarioLogado }: PrestadoresObrasProp
   const [modalEntrada, setModalEntrada] = useState(false);
   const [modalSaida, setModalSaida] = useState(false);
   const [modalProrrogar, setModalProrrogar] = useState(false);
-  const [modalOcrAberto, setModalOcrAberto] = useState(false);
   const [modalVisualizarFoto, setModalVisualizarFoto] = useState<string | null>(null);
   const [modalPermissoes, setModalPermissoes] = useState(false);
   const [modalConfigHorarios, setModalConfigHorarios] = useState(false);
@@ -490,28 +487,6 @@ export default function PrestadoresObras({ usuarioLogado }: PrestadoresObrasProp
     }
     setModalNovoCadastro(true);
     setFabLiberacaoAberto(false);
-  };
-
-  // OCR de Documentos
-  const handleOcrConfirmado = (dados: {
-    nomeCompleto: string;
-    documento: string;
-    tipoDocumento: string;
-    fotoDocumentoBase64?: string;
-    fotoRostoBase64?: string;
-    empresa?: string;
-  }) => {
-    setNomeCompleto(dados.nomeCompleto);
-    setDocumento(dados.documento);
-    setTipoDocumento(dados.tipoDocumento);
-    if (dados.fotoDocumentoBase64) setFotoDocumento(dados.fotoDocumentoBase64);
-    if (dados.fotoRostoBase64) setFotoRosto(dados.fotoRostoBase64);
-    if (dados.empresa && !empresa) setEmpresa(dados.empresa);
-    setModalOcrAberto(false);
-    setMensagem({ 
-      tipo: 'sucesso', 
-      texto: `Documento digitalizado: ${dados.nomeCompleto} (${dados.documento})` 
-    });
   };
 
   // Upload manual de foto do rosto
@@ -2282,19 +2257,12 @@ export default function PrestadoresObras({ usuarioLogado }: PrestadoresObrasProp
 
             <form onSubmit={modalEditarCadastro ? salvarEdicaoCadastro : salvarCadastro} className="space-y-3.5">
               
-              {/* Nome Completo + Botão OCR */}
+              {/* Nome Completo */}
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
                   <label className="block text-xs font-black uppercase text-slate-300">
                     Nome Completo *
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => setModalOcrAberto(true)}
-                    className="text-purple-400 hover:text-purple-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                  >
-                    <Scan className="w-3.5 h-3.5" /> Ler CNH/RG com IA (OCR)
-                  </button>
                 </div>
                 <input
                   type="text"
@@ -2993,15 +2961,6 @@ export default function PrestadoresObras({ usuarioLogado }: PrestadoresObrasProp
             </div>
           </div>
         </div>
-      )}
-
-      {/* MODAL OCR */}
-      {modalOcrAberto && (
-        <ModalLeitorDocumentoOCR
-          aberto={modalOcrAberto}
-          onFechar={() => setModalOcrAberto(false)}
-          onDadosConfirmados={handleOcrConfirmado}
-        />
       )}
 
       {/* MODAL VISUALIZAR FOTO EXPANDIDA */}

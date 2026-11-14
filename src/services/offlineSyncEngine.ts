@@ -1,9 +1,12 @@
 /**
- * INFPORT 1.0 — Motor de Trabalho Offline e Sincronização Automática
- * 
- * Garante que a portaria e guarita funcionem sem interrupções por 3+ horas
- * mesmo em quedas totais de internet. Todas as ações realizadas offline são
- * enfileiradas localmente e sincronizadas com o Supabase assim que a conexão retorna.
+ * INFPORT / PorttoHub — Motor de Trabalho Offline e Sincronização Automática Segura
+ *
+ * Garante operação contínua offline com:
+ * - Chave de idempotência (`operation_id`) para evitar duplicações em retries
+ * - Vínculo obrigatório de `condominio_id` e `operador_id` em cada ação enfileirada
+ * - Espelhamento persistente na store `offline_queue` do IndexedDB (resiste limpeza de cache de leitura)
+ * - Validação estrita de sessão autenticada, operador e tenant antes de sincronizar cada item
+ * - Marcação automática de conflito caso o operador/condomínio ativo não corresponda ao item da fila
  */
 
 import { supabase } from './supabase';
@@ -15,6 +18,64 @@ import {
   saoBlocosEquivalentes
 } from './condominioService';
 import { invalidarCacheTabela } from './redisCacheService';
+import { isCondominioIdValido, temAcessoGlobalExplicito } from './autorizacaoService';
+import { salvarFilaOfflineIndexedDb, lerFilaOfflineIndexedDb } from './porttoHubDb';
+
+export type EstadoAcaoOffline = 'pendente' | 'sincronizando' | 'conflito' | 'erro';
+
+export interface AcaoOffline {
+  id: string;
+  operation_id: string;
+  condominio_id?: string;
+  operador_id?: string;
+  estado: EstadoAcaoOffline;
+  motivoConflito?: string;
+  tabela: string;
+  tipo: 'INSERT' | 'UPDATE' | 'DELETE';
+  dados: any;
+  criadoEm: string;
+  tentativas: number;
+  descricaoAmigavel: string;
+}
+
+const CHAVE_FILA_OFFLINE = 'infport_fila_acoes_offline_v1';
+const CHAVE_STATUS_CACHE = 'infport_cache_autonomia_3h_v1';
+
+function gerarOperationIdLocal(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `op_${crypto.randomUUID()}`;
+    }
+  } catch {
+    // Fallback abaixo
+  }
+  return `op_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function obterOperadorAtivoMemoria(): any | null {
+  if (typeof window === 'undefined') return null;
+  return (window as any).__operadorAtivo || null;
+}
+
+function obterCondominioAtivoMemoria(): string {
+  if (typeof window === 'undefined') return '';
+  const winId = (window as any).idCondominioAtivo;
+  if (isCondominioIdValido(winId)) return String(winId).trim();
+  try {
+    const lsId = localStorage.getItem('infport_condominio_ativo_id');
+    if (isCondominioIdValido(lsId)) return String(lsId).trim();
+  } catch {}
+  return '';
+}
+
+function persistirFilaEspelhada(fila: AcaoOffline[]): void {
+  try {
+    localStorage.setItem(CHAVE_FILA_OFFLINE, JSON.stringify(fila));
+  } catch (err) {
+    console.warn('[OfflineSyncEngine] Erro ao persistir fila no localStorage:', err);
+  }
+  salvarFilaOfflineIndexedDb(fila).catch(() => {});
+}
 
 async function validarEncomendaParaSyncSupabase(
   payload: any,
@@ -26,7 +87,6 @@ async function validarEncomendaParaSyncSupabase(
   const moradorId = payload?.morador_id ? String(payload.morador_id).trim() : '';
 
   if (tipoOperacao === 'UPDATE' && !unidade && !('morador_id' in (payload || {}))) {
-    // Atualização parcial (ex: baixa/entrega ou mudança de local) que não altera unidade/morador
     return { valido: true, payloadSaneado: payload };
   }
 
@@ -57,16 +117,14 @@ async function validarEncomendaParaSyncSupabase(
       .from('moradores')
       .select('id, condominio_id, nome, bloco, unidade')
       .eq('id', moradorId)
+      .eq('condominio_id', condominioId)
       .maybeSingle();
 
     if (error) {
       throw new Error(`Erro ao validar morador no servidor: ${error.message}`);
     }
     if (!mor) {
-      return { valido: false, erro: 'Morador vinculado não existe mais no cadastro.' };
-    }
-    if (mor.condominio_id && String(mor.condominio_id) !== condominioId) {
-      return { valido: false, erro: 'Morador pertence a outro condomínio.' };
+      return { valido: false, erro: 'Morador vinculado não existe neste condomínio.' };
     }
     if (!saoUnidadesEquivalentes(mor.unidade, unidade) || !saoBlocosEquivalentes(mor.bloco, eCasas ? (bloco || 'Casa') : bloco, tipoEstrutura)) {
       return {
@@ -85,7 +143,6 @@ async function validarEncomendaParaSyncSupabase(
     };
   }
 
-  // Sem morador_id: verifica se a unidade possui múltiplos moradores no servidor
   const { data: moradoresCondo, error: errMor } = await supabase
     .from('moradores')
     .select('id, condominio_id, nome, bloco, unidade')
@@ -129,19 +186,6 @@ async function validarEncomendaParaSyncSupabase(
   };
 }
 
-export interface AcaoOffline {
-  id: string;
-  tabela: string;
-  tipo: 'INSERT' | 'UPDATE' | 'DELETE';
-  dados: any;
-  criadoEm: string;
-  tentativas: number;
-  descricaoAmigavel: string;
-}
-
-const CHAVE_FILA_OFFLINE = 'infport_fila_acoes_offline_v1';
-const CHAVE_STATUS_CACHE = 'infport_cache_autonomia_3h_v1';
-
 /**
  * Registra uma ação executada em modo offline ou após falha de rede
  */
@@ -151,11 +195,21 @@ export function enfileirarAcaoOffline(
   dados: any,
   descricaoAmigavel: string = 'Operação da Portaria'
 ): AcaoOffline {
+  const opAtivo = obterOperadorAtivoMemoria();
+  const condoResolvido = isCondominioIdValido(dados?.condominio_id)
+    ? String(dados.condominio_id).trim()
+    : obterCondominioAtivoMemoria();
+  const operationId = String(dados?.operation_id || gerarOperationIdLocal());
+
   const acao: AcaoOffline = {
     id: 'offline_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+    operation_id: operationId,
+    condominio_id: condoResolvido || undefined,
+    operador_id: opAtivo?.id ? String(opAtivo.id) : undefined,
+    estado: 'pendente',
     tabela,
     tipo,
-    dados,
+    dados: typeof dados === 'object' && dados !== null ? { ...dados, condominio_id: dados.condominio_id || condoResolvido } : dados,
     criadoEm: new Date().toISOString(),
     tentativas: 0,
     descricaoAmigavel
@@ -163,11 +217,15 @@ export function enfileirarAcaoOffline(
 
   try {
     const filaAtual = obterFilaOffline();
-    filaAtual.push(acao);
-    localStorage.setItem(CHAVE_FILA_OFFLINE, JSON.stringify(filaAtual));
+    const duplicada = filaAtual.some(a => a.operation_id === operationId);
+    if (!duplicada) {
+      filaAtual.push(acao);
+      persistirFilaEspelhada(filaAtual);
+    }
 
-    // Notifica a aplicação em tempo real
-    window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: filaAtual.length, novaAcao: acao } }));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: filaAtual.length, novaAcao: acao } }));
+    }
     console.log(`[OfflineSyncEngine] Ação salva localmente (${filaAtual.length} pendente(s)): ${descricaoAmigavel}`);
   } catch (err) {
     console.warn('[OfflineSyncEngine] Erro ao persistir ação offline:', err);
@@ -177,13 +235,53 @@ export function enfileirarAcaoOffline(
 }
 
 /**
- * Retorna todas as ações pendentes na fila offline
+ * Hidrata a fila offline do IndexedDB (`offline_queue`) caso localStorage tenha sido limpo
+ */
+export async function hidratarFilaOfflineDeIndexedDb(): Promise<AcaoOffline[]> {
+  try {
+    const doIdb = await lerFilaOfflineIndexedDb();
+    const doLs = obterFilaOffline();
+
+    const mapa = new Map<string, AcaoOffline>();
+    for (const item of [...doIdb, ...doLs]) {
+      const opId = item?.operation_id || item?.id;
+      if (!opId) continue;
+      mapa.set(opId, {
+        ...item,
+        operation_id: opId,
+        estado: item.estado || 'pendente'
+      });
+    }
+
+    const consolidada = Array.from(mapa.values());
+    if (consolidada.length !== doLs.length) {
+      persistirFilaEspelhada(consolidada);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: consolidada.length } }));
+      }
+    }
+    return consolidada;
+  } catch {
+    return obterFilaOffline();
+  }
+}
+
+/**
+ * Retorna todas as ações pendentes na fila offline (com normalização para registros legados)
  */
 export function obterFilaOffline(): AcaoOffline[] {
   try {
     const raw = localStorage.getItem(CHAVE_FILA_OFFLINE);
     if (raw) {
-      return JSON.parse(raw);
+      const lista = JSON.parse(raw);
+      if (Array.isArray(lista)) {
+        return lista.map((item: any) => ({
+          ...item,
+          operation_id: item.operation_id || item.id,
+          condominio_id: item.condominio_id || item.dados?.condominio_id,
+          estado: item.estado || 'pendente'
+        }));
+      }
     }
   } catch (err) {
     console.warn('[OfflineSyncEngine] Erro ao ler fila offline:', err);
@@ -192,13 +290,17 @@ export function obterFilaOffline(): AcaoOffline[] {
 }
 
 /**
- * Remove uma ação da fila offline por ID
+ * Remove uma ação da fila offline por ID ou operation_id
  */
-export function removerAcaoFila(id: string): void {
+export function removerAcaoFila(idOuOperationId: string): void {
   try {
-    const filaAtual = obterFilaOffline().filter(a => a.id !== id);
-    localStorage.setItem(CHAVE_FILA_OFFLINE, JSON.stringify(filaAtual));
-    window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: filaAtual.length } }));
+    const filaAtual = obterFilaOffline().filter(
+      a => a.id !== idOuOperationId && a.operation_id !== idOuOperationId
+    );
+    persistirFilaEspelhada(filaAtual);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: filaAtual.length } }));
+    }
   } catch (err) {
     console.warn('[OfflineSyncEngine] Erro ao remover ação da fila:', err);
   }
@@ -208,130 +310,225 @@ export function removerAcaoFila(id: string): void {
  * Limpa toda a fila offline
  */
 export function limparFilaOffline(): void {
-  localStorage.removeItem(CHAVE_FILA_OFFLINE);
-  window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: 0 } }));
+  try {
+    localStorage.removeItem(CHAVE_FILA_OFFLINE);
+  } catch {}
+  salvarFilaOfflineIndexedDb([]).catch(() => {});
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: 0 } }));
+  }
 }
 
 /**
- * Sincroniza todas as ações pendentes da fila offline com o Supabase
+ * Sincroniza ações pendentes da fila offline com o Supabase validando sessão, operador e condomínio
  */
 export async function sincronizarFilaComSupabase(): Promise<{
   sucessos: number;
   falhas: number;
+  conflitos: number;
   restantes: number;
 }> {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    return { sucessos: 0, falhas: 0, restantes: obterFilaOffline().length };
+    return { sucessos: 0, falhas: 0, conflitos: 0, restantes: obterFilaOffline().length };
   }
 
+  await hidratarFilaOfflineDeIndexedDb();
   const fila = obterFilaOffline();
   if (fila.length === 0) {
-    return { sucessos: 0, falhas: 0, restantes: 0 };
+    return { sucessos: 0, falhas: 0, conflitos: 0, restantes: 0 };
   }
 
+  // Valida sessão Supabase Auth antes de tentar gravar qualquer item
+  let sessaoAtiva: any = null;
+  try {
+    const { data } = await supabase.auth.getSession();
+    sessaoAtiva = data?.session || null;
+  } catch {}
+
+  if (!sessaoAtiva?.user) {
+    console.warn('[OfflineSyncEngine] Sessão autenticada ausente. Sincronização adiada até novo login.');
+    return { sucessos: 0, falhas: 0, conflitos: 0, restantes: fila.length };
+  }
+
+  const operadorAtivo = obterOperadorAtivoMemoria();
+  const condoAtivo = obterCondominioAtivoMemoria();
+  const eGlobalAtivo = temAcessoGlobalExplicito(operadorAtivo);
+
   console.log(`[OfflineSyncEngine] Iniciando sincronização de ${fila.length} ação(ões) com o Supabase...`);
-  window.dispatchEvent(new CustomEvent('infport_sincronizacao_iniciada', { detail: { total: fila.length } }));
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('infport_sincronizacao_iniciada', { detail: { total: fila.length } }));
+  }
 
   let sucessos = 0;
   let falhas = 0;
-  const acoesNaoSincronizadas: AcaoOffline[] = [];
+  let conflitos = 0;
+  const acoesRestantes: AcaoOffline[] = [];
 
-  for (const acao of fila) {
+  for (const acaoOriginal of fila) {
+    const acao: AcaoOffline = { ...acaoOriginal };
+    const condoAcao = String(acao.condominio_id || acao.dados?.condominio_id || '').trim();
+
+    // 1. Guarda de isolamento multi-tenant: exige condominio_id UUID válido
+    if (!isCondominioIdValido(condoAcao) || !isUUID(condoAcao)) {
+      acao.estado = 'conflito';
+      acao.motivoConflito = 'Ação offline sem condomínio válido identificado.';
+      conflitos++;
+      acoesRestantes.push(acao);
+      continue;
+    }
+
+    // 2. Guarda de troca de condomínio: não envia ação de outro condomínio sem contexto autorizado
+    if (condoAtivo && condoAcao !== condoAtivo && !eGlobalAtivo) {
+      acao.estado = 'conflito';
+      acao.motivoConflito = `Condomínio ativo (${condoAtivo}) difere do condomínio da operação offline (${condoAcao}).`;
+      conflitos++;
+      acoesRestantes.push(acao);
+      continue;
+    }
+
+    // 3. Guarda de troca de operador: evita atribuir operação offline a outro operador logado
+    if (acao.operador_id && operadorAtivo?.id && String(acao.operador_id) !== String(operadorAtivo.id)) {
+      acao.estado = 'conflito';
+      acao.motivoConflito = 'Operação offline criada por outro operador. Faça login com o operador original para concluir o envio.';
+      conflitos++;
+      acoesRestantes.push(acao);
+      continue;
+    }
+
     try {
+      acao.estado = 'sincronizando';
       acao.tentativas += 1;
       let resError: any = null;
 
       if (acao.tipo === 'INSERT') {
-        // Remove IDs temporários gerados no front offline caso existam
-        let payload = { ...acao.dados };
+        let payload = { ...acao.dados, condominio_id: condoAcao };
         if (typeof payload.id === 'string' && payload.id.startsWith('offline_')) {
           delete payload.id;
         }
 
         if (acao.tabela === 'encomendas_itens') {
+          if (!payload.operation_id && acao.operation_id) {
+            payload.operation_id = acao.operation_id;
+          }
           const validacao = await validarEncomendaParaSyncSupabase(payload, 'INSERT');
           if (!validacao.valido) {
-            console.error(`[OfflineSyncEngine] Encomenda bloqueada por inconsistência de destinatário (${acao.descricaoAmigavel}): ${validacao.erro}`);
-            falhas++;
+            acao.estado = 'conflito';
+            acao.motivoConflito = validacao.erro || 'Destinatário inconsistente';
+            conflitos++;
+            acoesRestantes.push(acao);
             continue;
           }
           payload = validacao.payloadSaneado || payload;
-        }
 
-        const { error } = await supabase.from(acao.tabela).insert([payload]);
-        resError = error;
-        if (!error && acao.tabela === 'encomendas_itens' && payload.condominio_id) {
-          invalidarCacheTabela('encomendas_itens', payload.condominio_id).catch(() => {});
+          let { error } = await supabase
+            .from('encomendas_itens')
+            .upsert([payload], { onConflict: 'operation_id', ignoreDuplicates: true });
+
+          if (
+            error &&
+            (error.message?.includes('operation_id') ||
+              error.message?.includes('on conflict') ||
+              (error as any).code === '42703' ||
+              (error as any).code === '42P10')
+          ) {
+            const { operation_id, ...semOpId } = payload;
+            const retry = await supabase.from('encomendas_itens').insert([semOpId]);
+            error = retry.error;
+          }
+          resError = error;
+          if (!resError) {
+            invalidarCacheTabela('encomendas_itens', condoAcao).catch(() => {});
+          }
+        } else {
+          const { error } = await supabase.from(acao.tabela).insert([payload]);
+          resError = error;
         }
       } else if (acao.tipo === 'UPDATE') {
-        const idAlvo = acao.dados.id;
+        const idAlvo = acao.dados?.id;
         let payload = { ...acao.dados };
         delete payload.id;
+        delete payload.condominio_id;
 
         if (acao.tabela === 'encomendas_itens') {
-          const validacao = await validarEncomendaParaSyncSupabase(payload, 'UPDATE');
+          const validacao = await validarEncomendaParaSyncSupabase({ ...payload, condominio_id: condoAcao }, 'UPDATE');
           if (!validacao.valido) {
-            console.error(`[OfflineSyncEngine] Atualização de encomenda bloqueada por inconsistência (${acao.descricaoAmigavel}): ${validacao.erro}`);
-            falhas++;
+            acao.estado = 'conflito';
+            acao.motivoConflito = validacao.erro || 'Atualização inconsistente';
+            conflitos++;
+            acoesRestantes.push(acao);
             continue;
           }
           payload = validacao.payloadSaneado || payload;
+          delete payload.condominio_id;
         }
 
         if (idAlvo) {
-          const { error } = await supabase.from(acao.tabela).update(payload).eq('id', idAlvo);
+          const { error } = await supabase
+            .from(acao.tabela)
+            .update(payload)
+            .eq('id', idAlvo)
+            .eq('condominio_id', condoAcao);
           resError = error;
-          if (!error && acao.tabela === 'encomendas_itens' && payload.condominio_id) {
-            invalidarCacheTabela('encomendas_itens', payload.condominio_id).catch(() => {});
+          if (!error && acao.tabela === 'encomendas_itens') {
+            invalidarCacheTabela('encomendas_itens', condoAcao).catch(() => {});
           }
         }
       } else if (acao.tipo === 'DELETE') {
-        const idAlvo = acao.dados.id || acao.dados;
+        const idAlvo = acao.dados?.id || acao.dados;
         if (idAlvo) {
-          const { error } = await supabase.from(acao.tabela).delete().eq('id', idAlvo);
+          const { error } = await supabase
+            .from(acao.tabela)
+            .delete()
+            .eq('id', idAlvo)
+            .eq('condominio_id', condoAcao);
           resError = error;
         }
       }
 
       if (resError) {
         console.warn(`[OfflineSyncEngine] Erro ao sincronizar ${acao.descricaoAmigavel}:`, resError.message);
+        acao.estado = 'erro';
+        acao.motivoConflito = resError.message;
         falhas++;
-        acoesNaoSincronizadas.push(acao);
+        acoesRestantes.push(acao);
       } else {
         sucessos++;
         console.log(`[OfflineSyncEngine] Sincronizado com sucesso: ${acao.descricaoAmigavel}`);
       }
     } catch (err: any) {
       console.warn(`[OfflineSyncEngine] Exceção na sincronização de ${acao.descricaoAmigavel}:`, err.message);
+      acao.estado = 'erro';
+      acao.motivoConflito = err.message;
       falhas++;
-      acoesNaoSincronizadas.push(acao);
+      acoesRestantes.push(acao);
     }
   }
 
-  // Atualiza fila com o que sobrou
-  localStorage.setItem(CHAVE_FILA_OFFLINE, JSON.stringify(acoesNaoSincronizadas));
+  persistirFilaEspelhada(acoesRestantes);
 
-  window.dispatchEvent(new CustomEvent('infport_sincronizacao_concluida', {
-    detail: { sucessos, falhas, restantes: acoesNaoSincronizadas.length }
-  }));
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('infport_fila_atualizada', { detail: { total: acoesRestantes.length } }));
+    window.dispatchEvent(new CustomEvent('infport_sincronizacao_concluida', {
+      detail: { sucessos, falhas, conflitos, restantes: acoesRestantes.length }
+    }));
+  }
 
   return {
     sucessos,
     falhas,
-    restantes: acoesNaoSincronizadas.length
+    conflitos,
+    restantes: acoesRestantes.length
   };
 }
 
 /**
  * Pré-carrega e mantém em cache local todos os dados essenciais para 3+ horas de autonomia
- * DIRETRIZ SUPABASE FREE TIER: Verifica se o cache já está válido antes de consultar o banco!
  */
 export async function atualizarCacheAutonomia3Horas(condominioId: string, forcar: boolean = false): Promise<boolean> {
   if (!condominioId || condominioId === 'todos' || condominioId === 'global' || !isUUID(condominioId) || (typeof navigator !== 'undefined' && !navigator.onLine)) {
     return false;
   }
 
-  // 1. Verifica se já temos cache válido dentro da janela de 3 horas
   if (!forcar) {
     try {
       const statusRaw = localStorage.getItem(CHAVE_STATUS_CACHE);
@@ -340,7 +537,6 @@ export async function atualizarCacheAutonomia3Horas(condominioId: string, forcar
         if (status.condominioId === condominioId && status.atualizadoEm) {
           const decorridoMs = Date.now() - new Date(status.atualizadoEm).getTime();
           if (decorridoMs < 3 * 60 * 60 * 1000) {
-            // Cache de autonomia ainda está perfeitamente válido! Evita 4 requisições GET ao Supabase
             return true;
           }
         }
@@ -349,7 +545,6 @@ export async function atualizarCacheAutonomia3Horas(condominioId: string, forcar
   }
 
   try {
-    // Projeção estrita de colunas para reduzir drasticamente o Egress (sem campos pesados)
     const [moradoresRes, chavesRes, pontosRes, materiaisRes, custodiaRes] = await Promise.all([
       supabase.from('moradores').select('id, condominio_id, nome, bloco, unidade, telefone, status_acesso, tag_rfid, veiculo_placa, veiculo_modelo').eq('condominio_id', condominioId).order('nome'),
       supabase.from('chaves').select('id, condominio_id, codigo_chave, nome_chave, status, localizacao').eq('condominio_id', condominioId).order('codigo_chave'),
@@ -395,7 +590,6 @@ export async function atualizarCacheAutonomia3Horas(condominioId: string, forcar
       }));
     }
 
-    // Registra carimbo da autonomia
     localStorage.setItem(CHAVE_STATUS_CACHE, JSON.stringify({
       condominioId,
       atualizadoEm: timestamp,
@@ -430,7 +624,7 @@ export function obterStatusCacheAutonomia(): {
         const minutos = Math.floor(diffMs / 60000);
         return {
           atualizadoEm: parsed.atualizadoEm,
-          valido: minutos < 180, // Menos de 3 horas
+          valido: minutos < 180,
           minutosDesdeAtualizacao: minutos
         };
       }
@@ -448,7 +642,8 @@ export function inicializarMotorSincronizacaoOffline(): void {
   if (motorInicializado || typeof window === 'undefined') return;
   motorInicializado = true;
 
-  // 1. Sincroniza automaticamente assim que a conexão com a internet retorna
+  hidratarFilaOfflineDeIndexedDb().catch(() => {});
+
   window.addEventListener('online', () => {
     console.log('[OfflineSyncEngine] Conexão detectada! Disparando sincronização automática com Supabase...');
     setTimeout(() => {
@@ -456,7 +651,6 @@ export function inicializarMotorSincronizacaoOffline(): void {
     }, 1500);
   });
 
-  // 2. Heartbeat a cada 30 segundos para sincronizar se estiver online e houver pendências
   setInterval(() => {
     if (navigator.onLine && obterFilaOffline().length > 0) {
       sincronizarFilaComSupabase();

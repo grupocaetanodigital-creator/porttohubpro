@@ -44,12 +44,10 @@ import {
   Sun,
   Moon,
   Layers,
-  Scan,
   ArrowLeft,
   ChevronRight,
   LayoutGrid
 } from 'lucide-react';
-import AbaModelosDocumentosOCR from '../components/AbaModelosDocumentosOCR';
 import { obterTemaAtual, aplicarTema, TipoTema } from '../services/themeService';
 import SeletorTema from '../components/SeletorTema';
 import ModalGerenciarSetores from '../components/ModalGerenciarSetores';
@@ -101,8 +99,7 @@ export type TipoAbaConfiguracao =
   | 'backup' 
   | 'whats_modulos' 
   | 'locais_triagem' 
-  | 'setores_ronda' 
-  | 'modelos_documentos';
+  | 'setores_ronda';
 
 export default function Configuracoes({ usuarioLogado, onConfigSalva }: ConfiguracoesProps) {
   const [abaAtiva, setAbaAtiva] = useState<TipoAbaConfiguracao>('menu');
@@ -367,17 +364,6 @@ export default function Configuracoes({ usuarioLogado, onConfigSalva }: Configur
       corBorda: 'hover:border-rose-400 group-hover:border-rose-500',
       corBgIcone: 'bg-rose-500/10 text-rose-600 border border-rose-500/20 group-hover:bg-rose-600 group-hover:text-white',
       corBadge: 'bg-rose-50 text-rose-700 border-rose-200'
-    },
-    {
-      id: 'modelos_documentos' as TipoAbaConfiguracao,
-      numero: '11.8',
-      titulo: 'Design & Modelos de Documentos (OCR)',
-      subtitulo: 'Leitura ótica e layouts de conferência de CNH, RG, crachás e comprovantes.',
-      icone: Scan,
-      badge: 'OCR & Identidade',
-      corBorda: 'hover:border-purple-400 group-hover:border-purple-500',
-      corBgIcone: 'bg-purple-500/10 text-purple-600 border border-purple-500/20 group-hover:bg-purple-600 group-hover:text-white',
-      corBadge: 'bg-purple-50 text-purple-700 border-purple-200'
     },
     {
       id: 'backup' as TipoAbaConfiguracao,
@@ -2875,10 +2861,6 @@ export default function Configuracoes({ usuarioLogado, onConfigSalva }: Configur
             </div>
           </div>
         </div>
-      )}
-
-      {abaAtiva === 'modelos_documentos' && (
-        <AbaModelosDocumentosOCR />
       )}
 
       {/* MODAL GERENCIAR SETORES */}

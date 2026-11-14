@@ -11,12 +11,14 @@ export default function IndicadorConectividade() {
   const [online, setOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [mostrarVoltou, setMostrarVoltou] = useState(false);
   const [totalPendentes, setTotalPendentes] = useState(0);
+  const [totalConflitos, setTotalConflitos] = useState(0);
   const [sincronizando, setSincronizando] = useState(false);
   const [mensagemSincronizacao, setMensagemSincronizacao] = useState('');
 
   const atualizarFila = () => {
     const fila = obterFilaOffline();
     setTotalPendentes(fila.length);
+    setTotalConflitos(fila.filter(a => a.estado === 'conflito').length);
   };
 
   useEffect(() => {
@@ -105,11 +107,15 @@ export default function IndicadorConectividade() {
   // Online com ações pendentes para sincronizar
   if (online && totalPendentes > 0) {
     return (
-      <div className="fixed bottom-20 md:bottom-4 left-3 right-3 sm:right-auto sm:left-4 z-50 bg-blue-700 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 text-xs font-bold border border-blue-400/50 animate-in fade-in slide-in-from-bottom-2">
+      <div className={`fixed bottom-20 md:bottom-4 left-3 right-3 sm:right-auto sm:left-4 z-50 ${totalConflitos > 0 ? 'bg-amber-700 border-amber-400/50' : 'bg-blue-700 border-blue-400/50'} text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 text-xs font-bold border animate-in fade-in slide-in-from-bottom-2`}>
         <ArrowUpCircle className="w-4 h-4 text-blue-200 animate-bounce" />
         <div>
           <span>{totalPendentes} ação(ões) gravada(s) offline</span>
-          <span className="block text-[10px] text-blue-200 font-normal">Pronto para sincronizar com o Supabase</span>
+          <span className="block text-[10px] text-white/85 font-normal">
+            {totalConflitos > 0
+              ? `${totalConflitos} em conflito de operador/condomínio (retorne ao contexto original)`
+              : 'Pronto para sincronizar com o Supabase'}
+          </span>
         </div>
         <button
           onClick={dispararSincronizacaoManual}

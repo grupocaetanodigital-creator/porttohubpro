@@ -89,25 +89,11 @@ export interface BancoPredefinido {
 
 export const BANCOS_PADRAO: BancoPredefinido[] = [
   {
-    id: 'caetano_infport',
-    nome: 'B.D caetano_infport',
-    url: 'https://juafrepntyksgqiqzyes.supabase.co',
-    key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6Imp1YWZyZXBudHlrc2dxaXF6eWVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk2MTk2NDEsImV4cCI6MjEwNTE5NTY0MX0.vIAQfpjj2PXkgF5Lw8txa0OrCitxmUxG8IEhWePM3Is',
-    descricao: 'Banco antigo de onde você está puxando as informações'
-  },
-  {
-    id: 'caetano_backup_oficial',
-    nome: 'B.D caetano (Backup c/ 247 Entregadores)',
-    url: 'https://fukxrdzhryumbcqibtas.supabase.co',
-    key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ1a3hyZHpocnl1bWJjcWlidGFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NTY3MTUsImV4cCI6MjEwODQzMjcxNX0.f7DAt8NKPu4JMsLX-NMxBorBmFPxXTmtLJ359-ictz0',
-    descricao: 'Base com 247 entregadores, 15 operadores, condomínios e dados históricos'
-  },
-  {
-    id: 'porttohub_novo',
-    nome: 'banco de dados PorttoHub',
-    url: 'https://kkeizhscivyfjgetnbke.supabase.co',
-    key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtrZWl6aHNjaXZ5ZmpnZXRuYmtlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI2ODk5NDUsImV4cCI6MjEwODI2NTk0NX0.hQzzvICbZfNPziWrj8DlD-A8-Vm4xbr25Nr0xQe3BEA',
-    descricao: 'Banco de dados ativo oficial do PorttoHub v2.0'
+    id: 'origem_custom',
+    nome: 'Banco de Origem (Informar URL e Anon Key)',
+    url: '',
+    key: '',
+    descricao: 'Informe manualmente a URL e a chave pública (anon) do projeto de origem caso precise importar dados.'
   }
 ];
 
@@ -855,7 +841,7 @@ export async function testSupabaseConnection(credentials: SupabaseCredentials): 
     return { success: false, message: 'URL do Supabase inválida. Exemplo: https://xyz.supabase.co' };
   }
   if (!key || key.length < 20) {
-    return { success: false, message: 'Chave de API do Supabase inválida (deve ser anon ou service_role).' };
+    return { success: false, message: 'Chave pública (anon) do Supabase inválida. Nunca insira service_role no navegador.' };
   }
 
   const projectRef = extractProjectRef(url);

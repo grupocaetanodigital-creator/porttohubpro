@@ -250,8 +250,91 @@ export async function comprimirImagemBase64(
   });
 }
 
+const CACHE_URLS_ASSINADAS = new Map<string, { url: string; expiraEm: number }>();
+
 /**
- * Normaliza e formata qualquer URL de foto armazenada para a URL pública oficial do Supabase Storage.
+ * Limpa cache em memória de URLs assinadas (ex: no logout ou troca de condomínio)
+ */
+export function limparCacheUrlsAssinadas(): void {
+  CACHE_URLS_ASSINADAS.clear();
+}
+
+/**
+ * Extrai { bucket, path } de um caminho relativo ou URL do Supabase Storage (public ou sign).
+ */
+export function extrairCaminhoStorageSupabase(valor?: string | null): { bucket: string; path: string } | null {
+  if (!valor) return null;
+  const limpo = String(valor).trim();
+  if (!limpo || limpo.startsWith('data:') || limpo.startsWith('blob:')) return null;
+
+  const bucketPadrao = obterStorageBucket();
+
+  if (limpo.startsWith('condominios/') || limpo.startsWith('/condominios/')) {
+    return { bucket: bucketPadrao, path: limpo.replace(/^\/+/, '') };
+  }
+
+  const match = limpo.match(/\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/?#]+)\/([^?#]+)/i);
+  if (match && match[1] && match[2]) {
+    return {
+      bucket: decodeURIComponent(match[1]),
+      path: decodeURIComponent(match[2])
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Resolve qualquer URL ou path privado do Supabase Storage para uma Signed URL fresca (TTL 1h, cache RAM 45min).
+ * Tolera URLs públicas legadas, data:image/ e blob: durante transição.
+ */
+export async function resolverUrlFotoPrivada(
+  urlOuPath?: string | null,
+  forcarRenovacao: boolean = false
+): Promise<string> {
+  if (!urlOuPath) return '';
+  const limpo = String(urlOuPath).trim();
+  if (!limpo) return '';
+  if (limpo.startsWith('data:image/') || limpo.startsWith('blob:')) return limpo;
+
+  const parsed = extrairCaminhoStorageSupabase(limpo);
+  if (!parsed) {
+    return formatarUrlFoto(limpo);
+  }
+
+  const chaveCache = `${parsed.bucket}:${parsed.path}`;
+  const agora = Date.now();
+  if (!forcarRenovacao) {
+    const emCache = CACHE_URLS_ASSINADAS.get(chaveCache);
+    if (emCache && emCache.expiraEm > agora) {
+      return emCache.url;
+    }
+  }
+
+  try {
+    const storageClient = supabase?.storage || supabaseStorage?.storage;
+    if (storageClient) {
+      const { data, error } = await storageClient
+        .from(parsed.bucket)
+        .createSignedUrl(parsed.path, 3600);
+
+      if (!error && data?.signedUrl) {
+        CACHE_URLS_ASSINADAS.set(chaveCache, {
+          url: data.signedUrl,
+          expiraEm: agora + 45 * 60 * 1000
+        });
+        return data.signedUrl;
+      }
+    }
+  } catch (err) {
+    console.warn('[Storage] Aviso ao gerar signed URL:', err);
+  }
+
+  return formatarUrlFoto(limpo);
+}
+
+/**
+ * Normaliza e formata qualquer URL de foto armazenada.
  */
 export function formatarUrlFoto(url?: string | null): string {
   if (!url) return '';
@@ -259,21 +342,19 @@ export function formatarUrlFoto(url?: string | null): string {
   if (!limpa) return '';
 
   if (
-    limpa.includes('.supabase.co/storage/v1/object/public/') ||
+    limpa.includes('.supabase.co/storage/v1/object/') ||
     limpa.startsWith('http://') ||
     limpa.startsWith('https://') ||
-    limpa.startsWith('data:image/')
+    limpa.startsWith('data:image/') ||
+    limpa.startsWith('blob:')
   ) {
-    return limpa;
-  }
-
-  if (limpa.startsWith('blob:')) {
     return limpa;
   }
 
   const caminhoLimpo = limpa.replace(/^\/+/, '').replace(/^uploads\//, '');
   const baseUrl = obterSupabaseUrl();
   const bucket = obterStorageBucket();
+  if (!baseUrl) return caminhoLimpo;
   return `${baseUrl}/storage/v1/object/public/${bucket}/${caminhoLimpo}`;
 }
 
@@ -281,6 +362,7 @@ export interface UploadComprimidoParams {
   file: File | Blob;
   bucket?: string;
   pasta: string;
+  condominioId?: string;
   maxWidth?: number;
   maxHeight?: number;
   qualidade?: number;
@@ -289,6 +371,8 @@ export interface UploadComprimidoParams {
 
 export interface UploadComprimidoResposta {
   publicUrl: string;
+  signedUrl?: string;
+  storagePath: string;
   fileName: string;
   tamanhoOriginalKb: number;
   tamanhoComprimidoKb: number;
@@ -296,17 +380,35 @@ export interface UploadComprimidoResposta {
   arquivoComprimido?: File;
 }
 
+function resolverCondominioIdUpload(condominioIdParam?: string): string {
+  const candidatos = [
+    condominioIdParam,
+    typeof window !== 'undefined' ? (window as any).idCondominioAtivo : '',
+    typeof localStorage !== 'undefined' ? localStorage.getItem('infport_condominio_ativo_id') : ''
+  ];
+  for (const cand of candidatos) {
+    const str = String(cand || '').trim();
+    if (!str) continue;
+    const lower = str.toLowerCase();
+    if (lower === 'todos' || lower === 'global' || lower === 'null' || lower === 'undefined') continue;
+    const sanitizado = str.replace(/[^a-zA-Z0-9_-]/g, '');
+    if (sanitizado) return sanitizado;
+  }
+  return '';
+}
+
 /**
- * Upload Oficial Otimizado com Supabase Storage:
- * 1. Fornece Preview Otimista Imediato (0ms) via callback antes de qualquer operação pesada.
- * 2. Compressão no cliente via createImageBitmap / Canvas (máximo ~150KB-380KB).
- * 3. Upload direto com cacheControl estrito de 1 ano ('31536000') para eliminar egress.
- * 4. Retorna o arquivo já comprimido para reuso instantâneo em pipelines adicionais (como OCR).
+ * Upload Oficial Otimizado com Supabase Storage Privado Multi-Tenant:
+ * 1. Preview Otimista Imediato (0ms) via callback.
+ * 2. Compressão no cliente via createImageBitmap / Canvas (< 400KB).
+ * 3. Caminho particionado por condomínio: condominios/{condominio_id}/{pasta}/{arquivo}.jpg
+ * 4. Gera Signed URL privada imediatamente (com fallback para URL legada se necessário).
  */
 export async function uploadFotoComprimidaStorage({
   file,
   bucket: bucketParam,
   pasta,
+  condominioId,
   maxWidth = 1080,
   maxHeight = 1080,
   qualidade = 0.72,
@@ -315,7 +417,6 @@ export async function uploadFotoComprimidaStorage({
   const tamanhoOriginalBytes = file.size || 0;
   const tamanhoOriginalKb = Math.round(tamanhoOriginalBytes / 1024);
 
-  // 1. DISPARO IMEDIATO DO PREVIEW OTIMISTA (0ms)
   let previewUrl = '';
   if (onPreviewOtimista) {
     previewUrl = criarPreviewOtimista(file);
@@ -324,7 +425,6 @@ export async function uploadFotoComprimidaStorage({
     }
   }
 
-  // 2. Comprime arquivo com garantia < 400KB
   const arquivoComprimido = await comprimirImagemArquivo(file, maxWidth, maxHeight, qualidade);
   const tamanhoComprimidoBytes = arquivoComprimido.size;
   const tamanhoComprimidoKb = Math.round(tamanhoComprimidoBytes / 1024);
@@ -332,7 +432,6 @@ export async function uploadFotoComprimidaStorage({
     ? Math.max(0, Math.round((1 - tamanhoComprimidoBytes / tamanhoOriginalBytes) * 100))
     : 0;
 
-  // Fallback em base64 caso storage não responda
   let base64Fallback = '';
   try {
     base64Fallback = await new Promise<string>((resolve) => {
@@ -344,35 +443,51 @@ export async function uploadFotoComprimidaStorage({
   } catch {}
 
   const pastaLimpa = (pasta || 'etiquetas').replace(/[^a-zA-Z0-9_-]/g, '') || 'etiquetas';
+  const condoLimpo = resolverCondominioIdUpload(condominioId);
   const sufixoAleatorio = Math.random().toString(36).substring(2, 8);
   const nomeArquivo = `${Date.now()}_${sufixoAleatorio}.jpg`;
-  const storagePath = `${pastaLimpa}/${nomeArquivo}`;
+  const storagePath = condoLimpo
+    ? `condominios/${condoLimpo}/${pastaLimpa}/${nomeArquivo}`
+    : `${pastaLimpa}/${nomeArquivo}`;
   const bucket = bucketParam || obterStorageBucket();
 
-  let publicUrl = '';
+  let finalUrl = '';
+  let signedUrl = '';
   let uploadSucesso = false;
 
   try {
     const storageClient = supabase?.storage || supabaseStorage?.storage;
     if (storageClient) {
-      const { data: uploadData, error: uploadError } = await storageClient
+      const { error: uploadError } = await storageClient
         .from(bucket)
         .upload(storagePath, arquivoComprimido, {
           contentType: 'image/jpeg',
-          cacheControl: '31536000', // 1 ano de cache CDN para não gerar egress redundante
+          cacheControl: '3600',
           upsert: true
         });
 
       if (uploadError) {
-        console.warn('[Supabase Storage] Aviso no upload direto:', uploadError);
+        console.warn('[Supabase Storage] Aviso no upload privado:', uploadError);
       } else {
-        const { data: urlData } = storageClient
+        // Prioriza Signed URL privada para bucket com private = true
+        const { data: signedData } = await storageClient
           .from(bucket)
-          .getPublicUrl(storagePath);
+          .createSignedUrl(storagePath, 3600);
 
-        if (urlData?.publicUrl) {
-          publicUrl = urlData.publicUrl;
+        if (signedData?.signedUrl) {
+          signedUrl = signedData.signedUrl;
+          finalUrl = signedData.signedUrl;
+          CACHE_URLS_ASSINADAS.set(`${bucket}:${storagePath}`, {
+            url: signedData.signedUrl,
+            expiraEm: Date.now() + 45 * 60 * 1000
+          });
           uploadSucesso = true;
+        } else {
+          const { data: urlData } = storageClient.from(bucket).getPublicUrl(storagePath);
+          if (urlData?.publicUrl) {
+            finalUrl = urlData.publicUrl;
+            uploadSucesso = true;
+          }
         }
       }
     }
@@ -380,12 +495,14 @@ export async function uploadFotoComprimidaStorage({
     console.warn('[Supabase Storage] Exceção no upload direto:', errStorage);
   }
 
-  if (!uploadSucesso || !publicUrl) {
-    publicUrl = base64Fallback || (typeof file === 'string' ? file : '');
+  if (!uploadSucesso || !finalUrl) {
+    finalUrl = base64Fallback || (typeof file === 'string' ? file : '');
   }
 
   return {
-    publicUrl: formatarUrlFoto(publicUrl),
+    publicUrl: formatarUrlFoto(finalUrl),
+    signedUrl: signedUrl || undefined,
+    storagePath,
     fileName: storagePath,
     tamanhoOriginalKb,
     tamanhoComprimidoKb,

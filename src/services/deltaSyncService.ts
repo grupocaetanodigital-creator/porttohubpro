@@ -59,6 +59,14 @@ function salvarCacheRam<T>(tabela: string, condominioId: string, dados: T[]): vo
   mapaCondo.set(tabela, dados);
 }
 
+export function limparCacheRamCondominio(condominioId?: string): void {
+  if (condominioId) {
+    memoriaRamPorCondominio.delete(condominioId);
+  } else {
+    memoriaRamPorCondominio.clear();
+  }
+}
+
 /**
  * Lê os dados da tabela diretamente do cache local (Memória RAM -> IndexedDB) em 0ms
  */
@@ -346,7 +354,7 @@ export async function aplicarMutacaoLocal<T extends { id: any; condominio_id?: s
   let novaLista: T[] = [];
   if (tipo === 'DELETE') {
     novaLista = itensAtuais.filter((it: any) => String(it.id) !== chaveId);
-    await excluirItemLocal(tabela, item.id);
+    await excluirItemLocal(tabela, item.id, item.condominio_id || condominioId);
   } else {
     const idx = itensAtuais.findIndex((it: any) => String(it.id) === chaveId);
     if (idx >= 0) {

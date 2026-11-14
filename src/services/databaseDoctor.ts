@@ -512,6 +512,7 @@ CREATE TABLE IF NOT EXISTS public.moradores (
   status_acesso TEXT DEFAULT 'liberado',
   veiculo_placa TEXT,
   veiculo_modelo TEXT,
+  veiculo_cor TEXT,
   contato_emergencia TEXT,
   observacoes TEXT,
   ativo BOOLEAN DEFAULT TRUE,
@@ -537,6 +538,7 @@ ALTER TABLE IF EXISTS public.moradores
   ADD COLUMN IF NOT EXISTS status_acesso TEXT DEFAULT 'liberado',
   ADD COLUMN IF NOT EXISTS veiculo_placa TEXT,
   ADD COLUMN IF NOT EXISTS veiculo_modelo TEXT,
+  ADD COLUMN IF NOT EXISTS veiculo_cor TEXT,
   ADD COLUMN IF NOT EXISTS contato_emergencia TEXT,
   ADD COLUMN IF NOT EXISTS observacoes TEXT,
   ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT TRUE,
@@ -552,6 +554,7 @@ CREATE INDEX IF NOT EXISTS idx_moradores_veiculo_placa ON public.moradores(veicu
 CREATE TABLE IF NOT EXISTS public.operadores (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   condominio_id UUID,
+  auth_user_id UUID,
   nome TEXT NOT NULL,
   login TEXT UNIQUE NOT NULL,
   senha TEXT,
@@ -560,12 +563,16 @@ CREATE TABLE IF NOT EXISTS public.operadores (
   perfil TEXT DEFAULT 'operador',
   telefone TEXT,
   email TEXT,
+  unidade TEXT,
   turno TEXT DEFAULT 'Diurno',
   turno_padrao TEXT DEFAULT 'Diurno',
   nivel_acesso INTEGER DEFAULT 3,
   nivel_acesso_custom_id TEXT DEFAULT 'nivel_3',
   permissoes JSONB DEFAULT '{}'::jsonb,
   foto_url TEXT,
+  acesso_global_condominios BOOLEAN NOT NULL DEFAULT FALSE,
+  exigir_troca_senha BOOLEAN NOT NULL DEFAULT FALSE,
+  migrado_auth_em TIMESTAMPTZ,
   ativo BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -573,17 +580,22 @@ CREATE TABLE IF NOT EXISTS public.operadores (
 
 ALTER TABLE IF EXISTS public.operadores
   ADD COLUMN IF NOT EXISTS condominio_id UUID,
+  ADD COLUMN IF NOT EXISTS auth_user_id UUID,
   ADD COLUMN IF NOT EXISTS funcao TEXT DEFAULT 'Porteiro',
   ADD COLUMN IF NOT EXISTS cargo TEXT DEFAULT 'Porteiro',
   ADD COLUMN IF NOT EXISTS perfil TEXT DEFAULT 'operador',
   ADD COLUMN IF NOT EXISTS telefone TEXT,
   ADD COLUMN IF NOT EXISTS email TEXT,
+  ADD COLUMN IF NOT EXISTS unidade TEXT,
   ADD COLUMN IF NOT EXISTS turno TEXT DEFAULT 'Diurno',
   ADD COLUMN IF NOT EXISTS turno_padrao TEXT DEFAULT 'Diurno',
   ADD COLUMN IF NOT EXISTS nivel_acesso INTEGER DEFAULT 3,
   ADD COLUMN IF NOT EXISTS nivel_acesso_custom_id TEXT DEFAULT 'nivel_3',
   ADD COLUMN IF NOT EXISTS permissoes JSONB DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS foto_url TEXT,
+  ADD COLUMN IF NOT EXISTS acesso_global_condominios BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS exigir_troca_senha BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS migrado_auth_em TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT TRUE,
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
@@ -677,6 +689,7 @@ CREATE TABLE IF NOT EXISTS public.encomendas_itens (
   operador_baixa TEXT,
   operador_baixa_id TEXT,
   operador_baixa_nome TEXT,
+  operation_id TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -708,6 +721,7 @@ ALTER TABLE IF EXISTS public.encomendas_itens
   ADD COLUMN IF NOT EXISTS operador_baixa TEXT,
   ADD COLUMN IF NOT EXISTS operador_baixa_id TEXT,
   ADD COLUMN IF NOT EXISTS operador_baixa_nome TEXT,
+  ADD COLUMN IF NOT EXISTS operation_id TEXT,
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
@@ -866,13 +880,26 @@ ALTER TABLE IF EXISTS public.materiais_posto
 CREATE TABLE IF NOT EXISTS public.chaves (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   condominio_id UUID,
-  codigo_chave TEXT NOT NULL,
-  nome_chave TEXT NOT NULL,
+  codigo_chave TEXT,
+  nome_chave TEXT,
+  numero TEXT,
+  identificacao TEXT,
+  identificacao_sala TEXT,
+  setor TEXT,
+  localizacao TEXT,
   bloco TEXT,
   unidade TEXT,
   tempo_limite_horas INTEGER DEFAULT 2,
   status TEXT DEFAULT 'Disponível',
+  responsavel_atual TEXT,
+  telefone_responsavel TEXT,
+  retirada_em TIMESTAMPTZ,
+  posse_atual TEXT,
+  contato_posse TEXT,
+  retirado_as TIMESTAMPTZ,
   observacoes TEXT,
+  quantidade INTEGER DEFAULT 1,
+  qr_code TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -881,12 +908,21 @@ ALTER TABLE IF EXISTS public.chaves
   ADD COLUMN IF NOT EXISTS condominio_id UUID,
   ADD COLUMN IF NOT EXISTS codigo_chave TEXT,
   ADD COLUMN IF NOT EXISTS nome_chave TEXT,
+  ADD COLUMN IF NOT EXISTS numero TEXT,
+  ADD COLUMN IF NOT EXISTS identificacao TEXT,
+  ADD COLUMN IF NOT EXISTS identificacao_sala TEXT,
   ADD COLUMN IF NOT EXISTS setor TEXT,
   ADD COLUMN IF NOT EXISTS localizacao TEXT,
   ADD COLUMN IF NOT EXISTS bloco TEXT,
   ADD COLUMN IF NOT EXISTS unidade TEXT,
   ADD COLUMN IF NOT EXISTS tempo_limite_horas INTEGER DEFAULT 2,
   ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Disponível',
+  ADD COLUMN IF NOT EXISTS responsavel_atual TEXT,
+  ADD COLUMN IF NOT EXISTS telefone_responsavel TEXT,
+  ADD COLUMN IF NOT EXISTS retirada_em TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS posse_atual TEXT,
+  ADD COLUMN IF NOT EXISTS contato_posse TEXT,
+  ADD COLUMN IF NOT EXISTS retirado_as TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS observacoes TEXT,
   ADD COLUMN IF NOT EXISTS quantidade INTEGER DEFAULT 1,
   ADD COLUMN IF NOT EXISTS qr_code TEXT,
@@ -1036,7 +1072,6 @@ CREATE TABLE IF NOT EXISTS public.chamados_manutencao (
   data_abertura TIMESTAMPTZ DEFAULT NOW(),
   data_conclusao TIMESTAMPTZ,
   solicitante TEXT,
-  local_especifico TEXT,
   concluido_em TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -1067,7 +1102,6 @@ ALTER TABLE IF EXISTS public.chamados_manutencao
   ADD COLUMN IF NOT EXISTS data_abertura TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS data_conclusao TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS solicitante TEXT,
-  ADD COLUMN IF NOT EXISTS local_especifico TEXT,
   ADD COLUMN IF NOT EXISTS concluido_em TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
@@ -1468,11 +1502,16 @@ ALTER TABLE IF EXISTS public.lembretes_portaria
 CREATE TABLE IF NOT EXISTS public.bancada_volumes (
   id TEXT PRIMARY KEY,
   condominio_id UUID,
-  estrutura TEXT NOT NULL,
-  unidade TEXT NOT NULL,
+  estrutura TEXT DEFAULT '',
+  unidade TEXT DEFAULT '',
   volumes INTEGER DEFAULT 1,
   observacao TEXT,
   tipo_volume TEXT DEFAULT 'normal',
+  codigo_volume TEXT,
+  tipo TEXT,
+  local TEXT,
+  operador_entrada TEXT,
+  morador_identificacao TEXT,
   operador_nome TEXT,
   operador_id TEXT,
   status TEXT DEFAULT 'ativo',
@@ -1487,6 +1526,11 @@ ALTER TABLE IF EXISTS public.bancada_volumes
   ADD COLUMN IF NOT EXISTS volumes INTEGER DEFAULT 1,
   ADD COLUMN IF NOT EXISTS observacao TEXT,
   ADD COLUMN IF NOT EXISTS tipo_volume TEXT DEFAULT 'normal',
+  ADD COLUMN IF NOT EXISTS codigo_volume TEXT,
+  ADD COLUMN IF NOT EXISTS tipo TEXT,
+  ADD COLUMN IF NOT EXISTS local TEXT,
+  ADD COLUMN IF NOT EXISTS operador_entrada TEXT,
+  ADD COLUMN IF NOT EXISTS morador_identificacao TEXT,
   ADD COLUMN IF NOT EXISTS operador_nome TEXT,
   ADD COLUMN IF NOT EXISTS operador_id TEXT,
   ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ativo',
@@ -1870,22 +1914,12 @@ ALTER TABLE IF EXISTS public.blacklist_bloqueios
 
 CREATE INDEX IF NOT EXISTS idx_blacklist_condo ON public.blacklist_bloqueios(condominio_id, ativo);
 
--- 24. LIMPEZA SEGURA DE TABELAS LEGADAS/DUPLICADAS
-DROP TABLE IF EXISTS rondas_execucoes CASCADE;
-DROP TABLE IF EXISTS registros_ronda CASCADE;
-DROP TABLE IF EXISTS pontos_ronda CASCADE;
-DROP TABLE IF EXISTS movimentacoes_chaves CASCADE;
-DROP TABLE IF EXISTS rondas_passagem_posto CASCADE;
-DROP TABLE IF EXISTS custodia_itens CASCADE;
-DROP TABLE IF EXISTS inspecoes_materiais CASCADE;
-DROP TABLE IF EXISTS visitas_prestadores CASCADE;
-DROP TABLE IF EXISTS usuarios_sistema CASCADE;
-DROP TABLE IF EXISTS blocos CASCADE;
-DROP TABLE IF EXISTS unidades CASCADE;
-DROP TABLE IF EXISTS encomendas CASCADE;
-DROP TABLE IF EXISTS materiais CASCADE;
+-- 24. OBSERVACAO DE SEGURANCA:
+-- Nenhuma tabela legada e removida automaticamente aqui (zero DROP TABLE/CASCADE).
+-- Para isolamento multi-condominio real, RLS restritivo e bucket privado, execute
+-- os scripts numerados na pasta supabase/sql/ (00 a 09) no SQL Editor do Supabase.
 
--- 25. SUPABASE STORAGE (Bucket 'encomendas' e Políticas de Armazenamento)
+-- 25. SUPABASE STORAGE (Bucket 'encomendas' PRIVADO e seguro por padrao)
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'encomendas') THEN
@@ -1893,94 +1927,46 @@ BEGIN
     VALUES (
       'encomendas',
       'encomendas',
-      TRUE,
-      20971520, -- 20MB
-      ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf']
+      FALSE,
+      10485760, -- 10MB
+      ARRAY['image/jpeg', 'image/png', 'image/webp']
     );
   ELSE
     UPDATE storage.buckets
-    SET public = TRUE,
-        file_size_limit = 20971520
+    SET public = FALSE,
+        file_size_limit = 10485760,
+        allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp']
     WHERE id = 'encomendas';
   END IF;
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
 
-DO $$
-BEGIN
-  DROP POLICY IF EXISTS "Permitir_upload_publico_encomendas" ON storage.objects;
-  CREATE POLICY "Permitir_upload_publico_encomendas"
-    ON storage.objects FOR INSERT TO public
-    WITH CHECK (bucket_id = 'encomendas');
-
-  DROP POLICY IF EXISTS "Permitir_leitura_publica_encomendas" ON storage.objects;
-  CREATE POLICY "Permitir_leitura_publica_encomendas"
-    ON storage.objects FOR SELECT TO public
-    USING (bucket_id = 'encomendas');
-
-  DROP POLICY IF EXISTS "Permitir_update_publico_encomendas" ON storage.objects;
-  CREATE POLICY "Permitir_update_publico_encomendas"
-    ON storage.objects FOR UPDATE TO public
-    USING (bucket_id = 'encomendas');
-
-  DROP POLICY IF EXISTS "Permitir_delete_publico_encomendas" ON storage.objects;
-  CREATE POLICY "Permitir_delete_publico_encomendas"
-    ON storage.objects FOR DELETE TO public
-    USING (bucket_id = 'encomendas');
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
-
--- 26. ROW LEVEL SECURITY (RLS) E POLÍTICAS PERMISSIVAS PARA TODAS AS 34 TABELAS
+-- 26. ROW LEVEL SECURITY (RLS) ATIVO SEM POLITICAS PERMISSIVAS
+-- As politicas restritivas por condominio (operador_pode_acessar_condominio)
+-- sao aplicadas pelo script supabase/sql/06_RLS_TABELAS_MULTI_TENANT.sql.
 DO $$
 DECLARE
   tbl TEXT;
-  pol RECORD;
   tabelas_alvo TEXT[] := ARRAY[
-    'condominios', 'configuracoes', 'operadores', 'moradores', 'entregadores',
-    'lotes_re', 'encomendas_itens', 'locais_armazenamento', 'custodia',
-    'materiais_posto', 'chaves', 'movimentacao_chaves', 'checklist_manutencao',
-    'chamados_manutencao', 'rondas_pontos', 'rondas_execucao', 'rondas_registros',
-    'rondas_setores', 'ocorrencias', 'passagens_posto', 'prestadores',
-    'prestadores_acessos', 'lembretes_portaria', 'bancada_volumes',
-    'bancada_conferencias', 'historico_absoluto', 'templates_whatsapp',
-    'agenda_emergencia', 'areas_comuns', 'reservas_areas_comuns',
-    'pontos_acesso', 'registros_acesso', 'passes_virtuais_qr', 'blacklist_bloqueios'
+    'condominios', 'configuracoes', 'operadores', 'operador_condominios',
+    'moradores', 'entregadores', 'lotes_re', 'encomendas_itens',
+    'locais_armazenamento', 'custodia', 'materiais_posto', 'chaves',
+    'movimentacao_chaves', 'checklist_manutencao', 'chamados_manutencao',
+    'rondas_pontos', 'rondas_execucao', 'rondas_registros', 'rondas_setores',
+    'ocorrencias', 'passagens_posto', 'prestadores', 'prestadores_acessos',
+    'lembretes_portaria', 'bancada_volumes', 'bancada_conferencias',
+    'historico_absoluto', 'templates_whatsapp', 'agenda_emergencia',
+    'areas_comuns', 'reservas_areas_comuns', 'pontos_acesso',
+    'registros_acesso', 'passes_virtuais_qr', 'blacklist_bloqueios'
   ];
 BEGIN
   FOREACH tbl IN ARRAY tabelas_alvo LOOP
-    BEGIN
-      -- Habilita RLS na tabela
+    IF EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = tbl
+    ) THEN
       EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', tbl);
-
-      -- Exclui dinamicamente QUALQUER política que já exista na tabela para evitar erro 42710
-      FOR pol IN 
-        SELECT policyname 
-        FROM pg_policies 
-        WHERE schemaname = 'public' AND tablename = tbl
-      LOOP
-        BEGIN
-          EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', pol.policyname, tbl);
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-      END LOOP;
-
-      -- Limpa também por nomes específicos conhecidos com espaços ou underscores
-      BEGIN
-        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Acesso total ' || tbl, tbl);
-        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Acesso_total_' || tbl, tbl);
-        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Acesso total portaria ' || tbl, tbl);
-        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I;', 'Acesso_app_' || tbl, tbl);
-      EXCEPTION WHEN OTHERS THEN NULL;
-      END;
-
-      -- Cria a política limpa e permissiva
-      BEGIN
-        EXECUTE format('CREATE POLICY %I ON public.%I FOR ALL USING (true) WITH CHECK (true);', 'Acesso_total_' || tbl, tbl);
-      EXCEPTION WHEN OTHERS THEN NULL;
-      END;
-
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END;
+    END IF;
   END LOOP;
 END $$;
 

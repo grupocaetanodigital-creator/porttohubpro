@@ -8,12 +8,13 @@
 
 const CACHE_IMAGENS_NOME = 'infport-card-images-v1';
 
-/**
- * Verifica se a URL é válida e candidata a cache
- */
 function ehUrlCacheavel(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
-  if (url.startsWith('data:image/')) return false; // Base64 inline não precisa de CacheStorage
+  if (url.startsWith('data:image/') || url.startsWith('blob:')) return false;
+  // Nunca persiste imagens privadas / assinadas do Supabase Storage em CacheStorage compartilhado
+  if (url.includes('/storage/v1/object/sign/') || url.includes('token=') || url.includes('supabase.co/storage/')) {
+    return false;
+  }
   return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('/');
 }
 

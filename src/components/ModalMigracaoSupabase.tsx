@@ -88,8 +88,8 @@ export default function ModalMigracaoSupabase({
   const [salvarBackupAntes, setSalvarBackupAntes] = useState(true);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
 
-  // Limpeza Prévia Completa do Banco Novo e Isolamento de Condomínios
-  const [limparBancoAntes, setLimparBancoAntes] = useState(true);
+  // Limpeza Prévia Completa do Banco Novo e Isolamento de Condomínios (DESATIVADO POR SEGURANÇA)
+  const [limparBancoAntes, setLimparBancoAntes] = useState(false);
   const [limpezaStatus, setLimpezaStatus] = useState<string | null>(null);
   const [limpandoManual, setLimpandoManual] = useState(false);
   const [modalConfirmacaoLimpeza, setModalConfirmacaoLimpeza] = useState(false);
@@ -802,11 +802,11 @@ export default function ModalMigracaoSupabase({
                     <div>
                       <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
                         <Key className="w-3.5 h-3.5 text-slate-500" />
-                        API Key (anon pública ou service_role - Editável):
+                        API Key Pública (anon / publishable):
                       </label>
                       <input
                         type="password"
-                        placeholder="Cole a chave anon ou service_role aqui..."
+                        placeholder="Cole apenas a chave pública anon aqui..."
                         value={supabaseKey}
                         onChange={(e) => {
                           setSupabaseKey(e.target.value);
@@ -815,8 +815,8 @@ export default function ModalMigracaoSupabase({
                         disabled={migrando || testandoConexao}
                         className="w-full px-3.5 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-blue-500 bg-white font-mono text-slate-900 shadow-2xs"
                       />
-                      <span className="text-[10px] text-slate-500 mt-1 block">
-                        Dica: Caso ocorra erro de autenticação (401), cole a chave service_role copiada do Supabase
+                      <span className="text-[10px] text-amber-700 font-semibold mt-1 block">
+                        Segurança: Nunca cole a chave service_role no navegador. Use apenas a chave pública (anon) ou exportação JSON.
                       </span>
                     </div>
                   </div>
@@ -859,7 +859,7 @@ export default function ModalMigracaoSupabase({
                             <div className="min-w-0">
                               <span className="font-bold block">{statusConexao.mensagem}</span>
                               <span className="text-[11px] text-rose-700 mt-0.5 block">
-                                Para corrigir: Acesse seu projeto no Supabase &rarr; Project Settings &rarr; API &rarr; Copie a chave "anon" ou "service_role" e cole no campo acima, depois clique em "Salvar Alterações Neste Botão".
+                                Para corrigir: verifique a URL e a chave pública "anon" em Project Settings &rarr; API (ou utilize importação via arquivo JSON).
                               </span>
                             </div>
                           </>

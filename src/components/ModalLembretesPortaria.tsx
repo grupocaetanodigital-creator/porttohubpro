@@ -60,6 +60,7 @@ interface ModalLembretesPortariaProps {
     nivel?: number;
     nivel_acesso?: number;
     nivel_acesso_custom_id?: string;
+    acesso_global_condominios?: boolean;
     eSuperAdminGlobal?: boolean;
   };
 }
@@ -103,27 +104,14 @@ export default function ModalLembretesPortaria({
   const [salvandoNovo, setSalvandoNovo] = useState<boolean>(false);
   const [listaUnidadesSugeridas, setListaUnidadesSugeridas] = useState<string[]>([]);
 
-  // Identifica se o usuário logado possui Nível 0 (Administrador Geral)
+  // Identifica se o usuário logado possui Nível 0 (Administrador Geral com acesso global explícito)
   const ehNivel0 = useMemo(() => {
-    if (
+    return Boolean(
+      operadorAtual?.acesso_global_condominios === true ||
       operadorAtual?.nivel_acesso === 0 ||
       operadorAtual?.nivel === 0 ||
-      (operadorAtual as any)?.nivel_acesso_custom_id === 'nivel_0' ||
-      operadorAtual?.perfil === 'admin' ||
-      operadorAtual?.perfil === 'admin_geral' ||
-      operadorAtual?.login === 'admin' ||
-      operadorAtual?.eSuperAdminGlobal
-    ) {
-      return true;
-    }
-    try {
-      const sessaoRaw = localStorage.getItem('infport_sessao_ativa_v1');
-      if (sessaoRaw) {
-        const s = JSON.parse(sessaoRaw);
-        if (s.login === 'admin' || s.nivel_acesso === 0 || s.perfil === 'admin') return true;
-      }
-    } catch {}
-    return false;
+      (operadorAtual as any)?.nivel_acesso_custom_id === 'nivel_0'
+    );
   }, [operadorAtual]);
 
   // Se o usuário logado for Nível 0, sugere 'adm' como remetente por padrão ao abrir o formulário
@@ -590,7 +578,11 @@ ALTER TABLE IF EXISTS public.lembretes_portaria
 ALTER TABLE public.lembretes_portaria ENABLE ROW LEVEL SECURITY;
 
 DO $$ BEGIN
-  CREATE POLICY "Acesso total lembretes_portaria" ON public.lembretes_portaria FOR ALL USING (true) WITH CHECK (true);
+  DROP POLICY IF EXISTS "Acesso total lembretes_portaria" ON public.lembretes_portaria;
+  CREATE POLICY "rls_tenant_lembretes_portaria" ON public.lembretes_portaria
+    FOR ALL TO authenticated
+    USING (public.operador_pode_acessar_condominio(condominio_id::text))
+    WITH CHECK (public.operador_pode_acessar_condominio(condominio_id::text));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

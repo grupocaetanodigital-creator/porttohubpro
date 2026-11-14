@@ -310,6 +310,7 @@ export default function Custodia({ usuarioLogado }: CustodiaProps) {
       const { publicUrl, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta,
+        condominioId: condId,
         maxWidth: 1200,
         maxHeight: 1200,
         qualidade: 0.8

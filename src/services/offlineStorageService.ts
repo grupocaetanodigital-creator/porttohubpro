@@ -195,3 +195,45 @@ export async function registrarPwaServiceWorker(): Promise<void> {
   }
 }
 
+/**
+ * Remove apenas caches de leitura em localStorage no logout,
+ * preservando a fila de ações offline pendentes de envio no IndexedDB.
+ */
+export function limparCachesLeituraPorLogout(): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (
+        k.startsWith(PREFIX_CACHE) ||
+        k.startsWith('infport_flags_') ||
+        k.startsWith('infport_permissoes_') ||
+        k === 'infport_condominio_ativo_id' ||
+        k === 'infport_sessao_ativa_v1' ||
+        k === 'infport_sessao_operador'
+      ) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+  } catch (e) {
+    console.warn('[OfflineService] Erro ao limpar caches de leitura no logout:', e);
+  }
+}
+
+export function limparCachesDeCondominio(condominioId: string): void {
+  if (!condominioId || typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const suffix = `_${condominioId}`;
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(PREFIX_CACHE) && k.endsWith(suffix)) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+  } catch {}
+}

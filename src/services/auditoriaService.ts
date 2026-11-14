@@ -58,13 +58,15 @@ CREATE INDEX IF NOT EXISTS idx_hist_abs_criado_em ON public.historico_absoluto(c
 -- Habilitar RLS (Row Level Security)
 ALTER TABLE public.historico_absoluto ENABLE ROW LEVEL SECURITY;
 
--- Política de Acesso Total para a Portaria
+-- Política restritiva isolada por condomínio para usuários autenticados
 DROP POLICY IF EXISTS "Acesso total portaria historico_absoluto" ON public.historico_absoluto;
-CREATE POLICY "Acesso total portaria historico_absoluto" 
-  ON public.historico_absoluto 
-  FOR ALL 
-  USING (true) 
-  WITH CHECK (true);
+DROP POLICY IF EXISTS "rls_tenant_historico_absoluto" ON public.historico_absoluto;
+CREATE POLICY "rls_tenant_historico_absoluto"
+  ON public.historico_absoluto
+  FOR ALL
+  TO authenticated
+  USING (public.operador_pode_acessar_condominio(condominio_id::text))
+  WITH CHECK (public.operador_pode_acessar_condominio(condominio_id::text));
 
 -- Habilitar Realtime do Supabase com proteção contra duplicação
 DO $$

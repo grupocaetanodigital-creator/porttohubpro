@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { supabase } from '../services/supabase';
+import { supabase, obterAccessTokenAtual } from '../services/supabase';
+import { isCondominioIdValido, temAcessoGlobalExplicito } from '../services/autorizacaoService';
 import { 
   Building2,
   MapPin,
@@ -257,31 +258,32 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   const loginStr = (usuarioLogado?.login || '').toLowerCase();
   const nomeStr = (usuarioLogado?.nome || '').toLowerCase();
 
-  // Detecção estrita de Síndica Login Lvl 1 (ou perfil Síndico)
+  // Regra C: Acesso global somente com flag explícito do banco/backend (nunca por login === 'admin' ou nivel_acesso <= 1)
+  const eAdminGlobal = Boolean(
+    usuarioLogado?.eSuperAdminGlobal || temAcessoGlobalExplicito(usuarioLogado)
+  );
+
+  // Detecção estrita de perfil Síndico
   const ehSindicaLvl1 = Boolean(
-    !usuarioLogado?.eSuperAdminGlobal &&
-    loginStr !== 'admin' &&
+    !eAdminGlobal &&
     (
       perfilStr.includes('sind') ||
       Boolean(usuarioLogado?.eSindico) ||
       loginStr.includes('sindic') ||
       nomeStr.includes('sindic') ||
-      nivelNum === 1 ||
-      usuarioLogado?.nivel_acesso_custom_id === 'nivel_1' ||
       nivelNum === 4 ||
       usuarioLogado?.nivel_acesso_custom_id === 'nivel_4'
     )
   );
-  
-  const eAdmin = !ehSindicaLvl1 && Boolean(
-    usuarioLogado?.eSuperAdminGlobal ||
-    loginStr === 'admin' ||
+
+  const eAdminLocal = !ehSindicaLvl1 && !eAdminGlobal && Boolean(
     perfilStr === 'admin' ||
     perfilStr === 'admin_geral' ||
     nivelNum === 0
   );
-  const eMaster = !ehSindicaLvl1 && (perfilStr === 'master' || nivelNum === 1 || nivelNum === 0 || Boolean(usuarioLogado?.eSuperAdminGlobal));
-  const eSupervisor = !ehSindicaLvl1 && (perfilStr === 'supervisor' || nivelNum === 2);
+  const eAdmin = eAdminGlobal || eAdminLocal;
+  const eMaster = !ehSindicaLvl1 && (eAdminGlobal || perfilStr === 'master' || nivelNum === 1 || nivelNum === 0);
+  const eSupervisor = !ehSindicaLvl1 && !eAdminGlobal && (perfilStr === 'supervisor' || nivelNum === 2);
   const eOperador = (perfilStr === 'operador' || perfilStr === 'porteiro' || nivelNum >= 3) && !eAdmin && !eSupervisor && !ehSindicaLvl1;
   const eSindico = ehSindicaLvl1 || perfilStr === 'sindico' || perfilStr === 'síndico' || nivelNum === 4;
 
@@ -305,11 +307,11 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   const podeGerenciarNiveis = !eSindico && (eAdmin || verificarPermissao(usuarioLogado, 'cadastros', 'gerenciar_niveis') || eMaster);
 
   const podeConfigurarCondominio = !eSindico && (eAdmin || verificarPermissao(usuarioLogado, 'cadastros', 'configurar_condominio'));
-  const podeCadastrarNovosCondominios = eAdmin || verificarPermissao(usuarioLogado, 'cadastros', 'condominios');
+  const podeCadastrarNovosCondominios = eAdminGlobal;
   const podeExcluirCadastros = eAdmin || verificarPermissao(usuarioLogado, 'cadastros', 'excluir');
 
   // Diretriz de Segurança RBAC: Permite customizar numeração se for Admin/Master/Supervisor ou tiver permissão ativa
-  const podeCustomizarEstrutura = !eSindico && (eAdmin || eMaster || (eSupervisor && podeConfigurarCondominio) || verificarPermissao(usuarioLogado, 'cadastros', 'condominios'));
+  const podeCustomizarEstrutura = !eSindico && (eAdmin || eMaster || (eSupervisor && podeConfigurarCondominio) || (eAdminGlobal && verificarPermissao(usuarioLogado, 'cadastros', 'condominios')));
 
   // Estado da Unidade que a Síndica está acessando no momento
   const [unidadeAcessadaManual, setUnidadeAcessadaManual] = useState<string>(() => {
@@ -384,7 +386,7 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   };
 
   const voltarParaCondominios = () => {
-    if (eAdmin) {
+    if (eAdminGlobal || (eSupervisor && condominios.length > 1)) {
       setAbaAtiva("condominios");
       setCondominioSelecionadoHub(null);
     } else {
@@ -393,22 +395,22 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   };
 
   const [abaAtiva, setAbaAtiva] = useState<'condominios' | 'operadores' | 'moradores'>(() => {
-    if (eAdmin) return 'condominios';
+    if (eAdminGlobal) return 'condominios';
     if (podeVisualizarMoradores) return 'moradores';
     if (podeVerOperadores) return 'operadores';
     return 'moradores';
   });
 
-  // Guardião RBAC de abas: não-administradores nunca permanecem em telas não autorizadas
+  // Guardião RBAC de abas: não-administradores globais nunca permanecem em telas não autorizadas
   useEffect(() => {
-    if (!eAdmin) {
+    if (!eAdminGlobal && !(eSupervisor && condominios.length > 1)) {
       if (abaAtiva === 'condominios') {
         setAbaAtiva(podeVisualizarMoradores ? 'moradores' : (podeVerOperadores ? 'operadores' : 'moradores'));
       } else if (abaAtiva === 'operadores' && !podeVerOperadores) {
         setAbaAtiva('moradores');
       }
     }
-  }, [eAdmin, abaAtiva, podeVisualizarMoradores, podeVerOperadores]);
+  }, [eAdminGlobal, eSupervisor, condominios.length, abaAtiva, podeVisualizarMoradores, podeVerOperadores]);
 
   const abrirMenuCondominio = (c: any) => {
     if (!c?.id) return;
@@ -431,39 +433,41 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     sincronizarCondominioGlobal(c);
   };
 
-  // Se não for admin global, foca automaticamente e exclusivamente no condomínio do operador logado
+  // Se não for admin global nem supervisor multi-condomínio, foca exclusivamente no condomínio ativo autorizado
   useEffect(() => {
-    if (!eAdmin && condominios.length > 0 && !condominioSelecionadoHub) {
-      const meuCondo = condominios.find(c => c.id === usuarioLogado?.condominio_id) || condominios[0];
+    const alvoUnico = condominioAtivoProp || usuarioLogado?.condominio_id;
+    if (!eAdminGlobal && condominios.length > 0 && !condominioSelecionadoHub) {
+      const meuCondo = condominios.find(c => c.id === alvoUnico) || condominios[0];
       if (meuCondo) {
         setCondominioSelecionadoHub(meuCondo);
         setSubAbaCondo('unidades');
-        sincronizarCondominioGlobal(meuCondo);
       }
     }
-  }, [eAdmin, condominios, usuarioLogado?.condominio_id]);
+  }, [eAdminGlobal, condominios, condominioAtivoProp, usuarioLogado?.condominio_id, condominioSelecionadoHub]);
 
-  // Identificação do condomínio ativo em foco com isolamento estrito para não-admins
+  // Identificação do condomínio ativo em foco com isolamento estrito multi-tenant
   const condoAtivoId = useMemo(() => {
-    if (!eAdmin) {
-      return String(usuarioLogado?.condominio_id || condominioSelecionadoHub?.id || (condominios[0]?.id || '')).trim();
+    if (!eAdminGlobal && !eSupervisor) {
+      const preferido = isCondominioIdValido(condominioAtivoProp) ? condominioAtivoProp : usuarioLogado?.condominio_id;
+      return String(preferido || condominioSelecionadoHub?.id || (condominios[0]?.id || '')).trim();
     }
-    if (condominioSelecionadoHub?.id) return String(condominioSelecionadoHub.id).trim();
-    let raw = (condominioFiltroAdmin || condominioAtivoProp || (condominios[0]?.id || usuarioLogado?.condominio_id || '')) || (condominios[0]?.id || '');
-    if (raw === 'global' || raw === 'todos') {
-      const primeiroValido = condominios.find(c => c.id && c.id !== 'global' && c.id !== 'todos')?.id;
-      return primeiroValido ? String(primeiroValido).trim() : (condominios[0]?.id ? String(condominios[0].id).trim() : '');
+    if (condominioSelecionadoHub?.id && isCondominioIdValido(condominioSelecionadoHub.id)) {
+      return String(condominioSelecionadoHub.id).trim();
     }
-    return String(raw || '').trim();
-  }, [condominioSelecionadoHub, eAdmin, condominioFiltroAdmin, condominioAtivoProp, condominios, usuarioLogado?.condominio_id]);
+    const candidato = condominioFiltroAdmin || condominioAtivoProp || usuarioLogado?.condominio_id || condominios[0]?.id || '';
+    if (!isCondominioIdValido(candidato)) {
+      const primeiroValido = condominios.find(c => isCondominioIdValido(c.id))?.id;
+      return primeiroValido ? String(primeiroValido).trim() : '';
+    }
+    return String(candidato).trim();
+  }, [condominioSelecionadoHub, eAdminGlobal, eSupervisor, condominioFiltroAdmin, condominioAtivoProp, condominios, usuarioLogado?.condominio_id]);
 
   const condoEmFoco = useMemo(() => {
-    if (!eAdmin) {
-      return condominios.find(c => c.id === usuarioLogado?.condominio_id) || condominios[0] || null;
+    if (condominioSelecionadoHub && isCondominioIdValido(condominioSelecionadoHub.id)) {
+      return condominioSelecionadoHub;
     }
-    if (condominioSelecionadoHub) return condominioSelecionadoHub;
     return condominios.find(c => c.id === condoAtivoId) || condominios[0] || null;
-  }, [eAdmin, condominioSelecionadoHub, condominios, condoAtivoId, usuarioLogado?.condominio_id]);
+  }, [condominioSelecionadoHub, condominios, condoAtivoId]);
 
   const configCondoAtivo = mapaConfigsCondos[condoAtivoId] || {
     id: condoAtivoId,
@@ -474,23 +478,26 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   };
   const eEstruturaCasasAtivo = isEstruturaCasas(configCondoAtivo?.tipo_estrutura);
 
-  // ISOLAMENTO RIGOROSO MULTI-TENANT: Operadores pertencem exclusivamente ao condomínio em questão!
+  const [mapaVinculosOperadores, setMapaVinculosOperadores] = useState<Record<string, string[]>>({});
+
+  // ISOLAMENTO RIGOROSO MULTI-TENANT: Operadores pertencem ao condomínio ativo ou possuem vínculo explícito (Supervisor)
   const operadoresDoCondoAtivo = useMemo(() => {
-    if (!condoAtivoId || condoAtivoId === 'global' || condoAtivoId === 'todos') return [];
+    if (!isCondominioIdValido(condoAtivoId)) return [];
     const cidNorm = String(condoAtivoId).trim().toLowerCase();
     return operadores.filter(op => {
       const opCid = String(op.condominio_id || '').trim().toLowerCase();
-      // O operador DEVE pertencer estritamente a este condomínio
-      return opCid === cidNorm;
+      if (opCid === cidNorm) return true;
+      const links = mapaVinculosOperadores[op.id] || [];
+      return links.some(lid => String(lid).trim().toLowerCase() === cidNorm);
     });
-  }, [operadores, condoAtivoId]);
+  }, [operadores, condoAtivoId, mapaVinculosOperadores]);
 
   // Lista visível de operadores filtrada por permissões e pelo condomínio ativo
   const operadoresVisiveis = useMemo(() => {
     return operadoresDoCondoAtivo.filter(op => {
-      const ehAdminMaster = op.login?.toLowerCase() === 'admin' || op.perfil === 'admin_geral';
-      if (ehAdminMaster) {
-        return usuarioLogado?.login?.toLowerCase() === 'admin';
+      const ehContaGlobal = op.acesso_global_condominios === true || op.perfil === 'admin_geral';
+      if (ehContaGlobal && !eAdminGlobal) {
+        return false;
       }
       const ehContaAdmin = op.perfil?.toLowerCase() === 'admin' || Number(op.nivel_acesso) === 0;
       if (ehContaAdmin && !eAdmin) {
@@ -498,7 +505,7 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
       }
       return true;
     });
-  }, [operadoresDoCondoAtivo, usuarioLogado?.login, eAdmin]);
+  }, [operadoresDoCondoAtivo, eAdminGlobal, eAdmin]);
   const [loading, setLoading] = useState(false);
   const [mensagem, setMensagem] = useState({ tipo: '', texto: '' });
 
@@ -657,15 +664,17 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   // Formulário Operador
   const [nomeOperador, setNomeOperador] = useState('');
   const [loginOperador, setLoginOperador] = useState('');
-  const [senhaOperador, setSenhaOperador] = useState('');
-  const [mostrarSenhaOperador, setMostrarSenhaOperador] = useState(false);
-  const [camposSenhaOcultosEdicao, setCamposSenhaOcultosEdicao] = useState(true);
-  const [senhaCopiada, setSenhaCopiada] = useState(false);
+  const [emailOperador, setEmailOperador] = useState('');
+  const [novaSenhaAuth, setNovaSenhaAuth] = useState('');
+  const [mostrarNovaSenhaAuth, setMostrarNovaSenhaAuth] = useState(false);
+  const [authUserIdEdicao, setAuthUserIdEdicao] = useState<string | null>(null);
   const [fotoOperador, setFotoOperador] = useState('');
   const [funcaoOperador, setFuncaoOperador] = useState<string>('Porteiro');
   const [funcaoCustomizada, setFuncaoCustomizada] = useState<string>('');
   const [nivelAcesso, setNivelAcesso] = useState('nivel_3');
   const [condominioIdOperador, setCondominioIdOperador] = useState('');
+  const [condominiosVinculadosOperador, setCondominiosVinculadosOperador] = useState<string[]>([]);
+  const [acessoGlobalOperador, setAcessoGlobalOperador] = useState(false);
   const [unidadeOperador, setUnidadeOperador] = useState('TODAS');
   const [ativoOperador, setAtivoOperador] = useState(true);
   const [permissoesOperador, setPermissoesOperador] = useState<PermissoesModulo>(() => obterPermissoesPadraoNivel('nivel_3'));
@@ -882,15 +891,17 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     setZerosEsquerdaCondominio(true);
     setNomeOperador('');
     setLoginOperador('');
-    setSenhaOperador('');
-    setMostrarSenhaOperador(false);
-    setCamposSenhaOcultosEdicao(true);
-    setSenhaCopiada(false);
+    setEmailOperador('');
+    setNovaSenhaAuth('');
+    setMostrarNovaSenhaAuth(false);
+    setAuthUserIdEdicao(null);
     setFotoOperador('');
     setFuncaoOperador('Porteiro');
     setFuncaoCustomizada('');
     setNivelAcesso('nivel_3');
     setCondominioIdOperador(targetCondo);
+    setCondominiosVinculadosOperador(isCondominioIdValido(targetCondo) ? [targetCondo] : []);
+    setAcessoGlobalOperador(false);
     setUnidadeOperador('TODAS');
     setAtivoOperador(true);
     setPermissoesOperador(obterPermissoesPadraoNivel('nivel_3'));
@@ -928,21 +939,23 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
 
   const abrirNovoOperador = () => {
     limparFormularios();
-    let targetCondo = condoAtivoId || (condominios[0]?.id || usuarioLogado?.condominio_id || '');
-    if (targetCondo === 'global' || targetCondo === 'todos') {
-      targetCondo = 'todos';
+    let targetCondo = condoAtivoId || condominioAtivoProp || (condominios[0]?.id || usuarioLogado?.condominio_id || '');
+    if (!isCondominioIdValido(targetCondo)) {
+      targetCondo = condominios.find(c => isCondominioIdValido(c.id))?.id || '';
     }
     setCondominioIdOperador(targetCondo);
+    setCondominiosVinculadosOperador(isCondominioIdValido(targetCondo) ? [targetCondo] : []);
+    setAcessoGlobalOperador(false);
     setUnidadeOperador('TODAS');
     setFuncaoOperador('Porteiro');
     setFuncaoCustomizada('');
     setNivelAcesso('nivel_3');
     setPermissoesOperador(obterPermissoesPadraoNivel('nivel_3'));
     setIdEdicao(null);
-    setSenhaOperador('');
-    setMostrarSenhaOperador(false);
-    setCamposSenhaOcultosEdicao(false);
-    setSenhaCopiada(false);
+    setEmailOperador('');
+    setNovaSenhaAuth('');
+    setMostrarNovaSenhaAuth(false);
+    setAuthUserIdEdicao(null);
     setTipoFormulario('operador');
     setViewMode('form');
   };
@@ -978,93 +991,130 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   const carregarDados = async () => {
     setLoading(true);
     try {
-      // 0. Garante que a lista de condomínios esteja disponível desde o primeiro carregamento
+      const idsPermitidosUsuario: string[] = Array.isArray(usuarioLogado?.condominiosAutorizadosIds)
+        ? usuarioLogado.condominiosAutorizadosIds.filter((id: string) => isCondominioIdValido(id))
+        : (isCondominioIdValido(condominioAtivoProp)
+            ? [String(condominioAtivoProp)]
+            : (isCondominioIdValido(usuarioLogado?.condominio_id) ? [String(usuarioLogado.condominio_id)] : []));
+
+      const cacheEscopo = eAdminGlobal
+        ? (isCondominioIdValido(condominioFiltroAdmin) ? condominioFiltroAdmin : 'admin_global')
+        : (idsPermitidosUsuario[0] || 'local');
+
+      // 0/1. Carrega lista de condomínios autorizada diretamente no banco (isolamento por RLS + filtro explícito)
       let listaCondos = condominios;
-      if (listaCondos.length === 0) {
-        let { data: condoData } = await supabase.from('condominios').select('*').order('nome');
-        if (condoData && condoData.length > 0) {
-          if (!eAdmin) {
-            condoData = condoData.filter(c => c.id === usuarioLogado?.condominio_id);
-          }
-          listaCondos = condoData;
-          setCondominios(condoData);
-          salvarCacheLocal('condominios', condoData, !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global');
-          if (!condominioFiltroAdmin) {
-            const initialId = usuarioLogado?.condominio_id || condoData[0]?.id;
-            setCondominioFiltroAdmin(initialId);
-          }
-        } else {
-          const cacheCondos = obterCacheLocal<any[]>('condominios', !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global', []);
-          if (cacheCondos && cacheCondos.length > 0) {
-            listaCondos = cacheCondos;
-            setCondominios(cacheCondos);
-          }
+      let condoQuery = supabase.from('condominios').select('*').order('nome');
+      if (!eAdminGlobal && idsPermitidosUsuario.length > 0) {
+        condoQuery = condoQuery.in('id', idsPermitidosUsuario);
+      }
+      const { data: condoData, error: condoErr } = await condoQuery;
+      if (!condoErr && condoData) {
+        const filtrados = eAdminGlobal
+          ? condoData
+          : condoData.filter(c => idsPermitidosUsuario.includes(c.id));
+        listaCondos = filtrados;
+        setCondominios(filtrados);
+        if (filtrados.length > 0 && isCondominioIdValido(filtrados[0].id)) {
+          salvarCacheLocal('condominios', filtrados, cacheEscopo);
+        }
+        if (!condominioFiltroAdmin && filtrados[0]?.id) {
+          setCondominioFiltroAdmin(condominioAtivoProp || filtrados[0].id);
+        }
+      } else if (listaCondos.length === 0) {
+        const cacheCondos = obterCacheLocal<any[]>('condominios', cacheEscopo, []);
+        if (cacheCondos && cacheCondos.length > 0) {
+          listaCondos = cacheCondos;
+          setCondominios(cacheCondos);
         }
       }
 
-      const activeCondoId = (eAdmin
-        ? (condominioFiltroAdmin || listaCondos[0]?.id || usuarioLogado?.condominio_id || '')
-        : (usuarioLogado?.condominio_id || listaCondos[0]?.id || '')) || (listaCondos[0]?.id || '');
+      const activeCondoId = (eAdminGlobal || eSupervisor)
+        ? (isCondominioIdValido(condominioFiltroAdmin) ? condominioFiltroAdmin : (condominioAtivoProp || listaCondos[0]?.id || usuarioLogado?.condominio_id || ''))
+        : (condominioAtivoProp || usuarioLogado?.condominio_id || listaCondos[0]?.id || '');
 
-      // Carrega as configurações completas e atualizadas dos condomínios
+      // Carrega as configurações completas e atualizadas dos condomínios autorizados
       const configs: Record<string, CondominioConfig> = {};
       for (const c of listaCondos) {
         configs[c.id] = await carregarCondominioConfig(c.id, true);
       }
-      if (activeCondoId && !configs[activeCondoId]) {
+      if (isCondominioIdValido(activeCondoId) && !configs[activeCondoId]) {
         configs[activeCondoId] = await carregarCondominioConfig(activeCondoId, true);
       }
       setMapaConfigsCondos(configs);
 
-      // 1. Carrega lista de condomínios atualizada com status de ativação (isolada para não-admins)
-      let { data: condoData, error: condoErr } = await supabase.from('condominios').select('*').order('nome');
-      if (!condoErr && condoData) {
-        if (!eAdmin) {
-          condoData = condoData.filter(c => c.id === usuarioLogado?.condominio_id);
+      // Carrega vínculos multi-condomínio (operador_condominios) quando disponível
+      let mapaLinks: Record<string, string[]> = {};
+      try {
+        let linksQuery = supabase.from('operador_condominios').select('operador_id, condominio_id, ativo');
+        if (!eAdminGlobal && idsPermitidosUsuario.length > 0) {
+          linksQuery = linksQuery.in('condominio_id', idsPermitidosUsuario);
         }
-        setCondominios(condoData);
-        listaCondos = condoData;
-        salvarCacheLocal('condominios', condoData, !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global');
+        const { data: linksData, error: linksErr } = await linksQuery;
+        if (!linksErr && Array.isArray(linksData)) {
+          for (const row of linksData) {
+            if (row.ativo === false || !row.operador_id || !isCondominioIdValido(row.condominio_id)) continue;
+            if (!mapaLinks[row.operador_id]) mapaLinks[row.operador_id] = [];
+            if (!mapaLinks[row.operador_id].includes(row.condominio_id)) {
+              mapaLinks[row.operador_id].push(row.condominio_id);
+            }
+          }
+        }
+      } catch {
+        // Tabela operador_condominios ainda pode não existir antes do SQL ser aplicado
       }
+      setMapaVinculosOperadores(mapaLinks);
 
-      // 2. Carrega operadores isolados pelo condomínio do usuário quando não for admin global
-      let { data: opData, error: opErr } = await supabase.from('operadores').select('*').order('nome');
+      // 2. Carrega operadores isolados pelos condomínios autorizados (sem expor campo legado senha)
+      let opQuery = supabase
+        .from('operadores')
+        .select('id, nome, login, email, auth_user_id, nivel_acesso, nivel_acesso_custom_id, perfil, funcao, cargo, foto_url, condominio_id, unidade, permissoes, ativo, acesso_global_condominios, created_at')
+        .order('nome');
+      if (!eAdminGlobal && isCondominioIdValido(activeCondoId)) {
+        const idsFiltro = idsPermitidosUsuario.length > 0 ? idsPermitidosUsuario : [activeCondoId];
+        opQuery = opQuery.in('condominio_id', idsFiltro);
+      }
+      const { data: opData, error: opErr } = await opQuery;
       if (!opErr && opData) {
-        if (!eAdmin) {
-          opData = opData.filter(op => op.condominio_id === usuarioLogado?.condominio_id);
-        }
-        // Incorpora permissões granulares salvas no objeto de cada operador
-        const opComPermissoes = opData.map(op => ({
+        const opFiltrados = eAdminGlobal
+          ? opData
+          : opData.filter(op => idsPermitidosUsuario.includes(op.condominio_id) || (mapaLinks[op.id] || []).some(cid => idsPermitidosUsuario.includes(cid)));
+        const opComPermissoes = opFiltrados.map(op => ({
           ...op,
           permissoes: (op.permissoes && typeof op.permissoes === 'object' && Object.keys(op.permissoes).length > 0)
             ? op.permissoes
             : obterPermissoesOperador(op)
         }));
         setOperadores(opComPermissoes);
-        salvarCacheLocal('operadores', opComPermissoes, !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global');
+        salvarCacheLocal('operadores', opComPermissoes, cacheEscopo);
       }
 
-      // 3. Carrega moradores isolados pelo condomínio quando não for admin global
+      // 3. Carrega moradores estritamente do condomínio ativo ou autorizados
       try {
-        let { data: morData, error: morErr } = await supabase
+        let morQuery = supabase
           .from('moradores')
           .select('*')
           .order('unidade', { ascending: true });
+        if (isCondominioIdValido(activeCondoId)) {
+          morQuery = morQuery.eq('condominio_id', activeCondoId);
+        } else if (!eAdminGlobal && idsPermitidosUsuario.length > 0) {
+          morQuery = morQuery.in('condominio_id', idsPermitidosUsuario);
+        }
+        const { data: morData, error: morErr } = await morQuery;
         if (!morErr && morData && Array.isArray(morData)) {
-          if (!eAdmin) {
-            morData = morData.filter(m => m.condominio_id === usuarioLogado?.condominio_id);
-          }
-          setMoradores(morData);
-          salvarCacheLocal('moradores', morData, !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global');
+          const filtradosMor = (!eAdminGlobal && idsPermitidosUsuario.length > 0)
+            ? morData.filter(m => idsPermitidosUsuario.includes(m.condominio_id))
+            : morData;
+          setMoradores(filtradosMor);
+          salvarCacheLocal('moradores', filtradosMor, activeCondoId || cacheEscopo);
         } else {
-          const cacheMoradores = obterCacheLocal<any[]>('moradores', !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global', []);
+          const cacheMoradores = obterCacheLocal<any[]>('moradores', activeCondoId || cacheEscopo, []);
           if (cacheMoradores && cacheMoradores.length > 0) {
             setMoradores(cacheMoradores);
           }
         }
       } catch (errMor) {
         console.warn('Aviso ao sincronizar moradores no banco:', errMor);
-        const cacheMoradores = obterCacheLocal<any[]>('moradores', !eAdmin ? (usuarioLogado?.condominio_id || 'local') : 'global', []);
+        const cacheMoradores = obterCacheLocal<any[]>('moradores', activeCondoId || cacheEscopo, []);
         if (cacheMoradores && cacheMoradores.length > 0) {
           setMoradores(cacheMoradores);
         }
@@ -1080,12 +1130,15 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     }
   };
 
-  const getNomeCondominioPorId = (id: string | null | undefined) => {
-    if (!id || id === 'global' || id === 'todos') {
-      return '🌐 Todos os Condomínios (Global)';
+  const getNomeCondominioPorId = (id: string | null | undefined, ehGlobal = false) => {
+    if (ehGlobal) {
+      return '🌐 Acesso Global Autorizado';
+    }
+    if (!isCondominioIdValido(id)) {
+      return '⚠️ Sem condomínio vinculado';
     }
     const c = condominios.find(item => item.id === id);
-    return c ? c.nome : (id ? 'Condomínio Vinculado' : '🌐 Todos os Condomínios (Global)');
+    return c ? c.nome : 'Condomínio Vinculado';
   };
 
   // Mapeamento dinâmico e seguro de contagens de operadores e moradores por condomínio
@@ -1437,6 +1490,60 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     setViewMode('form');
   };
 
+  const sincronizarVinculosOperadorCondominio = async (
+    operadorId: string,
+    condoPrincipalId: string,
+    condosVinculados: string[]
+  ) => {
+    try {
+      const listaLimpa = Array.from(
+        new Set(
+          [condoPrincipalId, ...condosVinculados].filter(id => isCondominioIdValido(id))
+        )
+      );
+      if (!operadorId || listaLimpa.length === 0) return;
+
+      // Remove vínculos que não estão mais autorizados (ex: Supervisor -> Porteiro)
+      const { data: existentes, error: errBusca } = await supabase
+        .from('operador_condominios')
+        .select('id, condominio_id')
+        .eq('operador_id', operadorId);
+
+      if (errBusca) {
+        const msg = (errBusca.message || '').toLowerCase();
+        if (msg.includes('does not exist') || msg.includes('schema cache') || (errBusca as any).code === '42P01') {
+          return;
+        }
+        throw errBusca;
+      }
+
+      const idsParaRemover = (existentes || [])
+        .filter((row: any) => !listaLimpa.includes(row.condominio_id))
+        .map((row: any) => row.condominio_id);
+
+      if (idsParaRemover.length > 0) {
+        await supabase
+          .from('operador_condominios')
+          .delete()
+          .eq('operador_id', operadorId)
+          .in('condominio_id', idsParaRemover);
+      }
+
+      const rows = listaLimpa.map(cid => ({
+        operador_id: operadorId,
+        condominio_id: cid,
+        principal: cid === condoPrincipalId,
+        ativo: true
+      }));
+
+      await supabase
+        .from('operador_condominios')
+        .upsert(rows, { onConflict: 'operador_id,condominio_id' });
+    } catch (err) {
+      console.warn('[Cadastros] Aviso ao sincronizar operador_condominios:', err);
+    }
+  };
+
   const salvarOperador = async (e: React.FormEvent) => {
     e.preventDefault();
     const podeGerenciarOperadores = eAdmin || eMaster || (idEdicao ? podeEditarOperadores : podeCadastrarOperadores);
@@ -1447,6 +1554,22 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
 
     if (!nomeOperador.trim() || !loginOperador.trim()) {
       setMensagem({ tipo: 'erro', texto: 'Preencha o nome e o login do operador.' });
+      return;
+    }
+
+    const emailLimpo = emailOperador.trim().toLowerCase();
+    const senhaLimpa = novaSenhaAuth.trim();
+
+    if (!idEdicao && !emailLimpo) {
+      setMensagem({ tipo: 'erro', texto: 'Informe o e-mail de acesso (Supabase Auth) para o novo operador.' });
+      return;
+    }
+    if (!idEdicao && senhaLimpa.length < 6) {
+      setMensagem({ tipo: 'erro', texto: 'A senha inicial no Supabase Auth deve ter pelo menos 6 caracteres.' });
+      return;
+    }
+    if (idEdicao && senhaLimpa && senhaLimpa.length < 6) {
+      setMensagem({ tipo: 'erro', texto: 'A nova senha deve ter pelo menos 6 caracteres.' });
       return;
     }
 
@@ -1475,28 +1598,48 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
 
       // Não-administradores não podem criar ou promover usuários para nível Admin/Master
       if (!eAdmin && nivelNum <= 1) {
-        setMensagem({ tipo: 'erro', texto: 'Apenas Administradores Master podem conceder nível de Administrador.' });
+        setMensagem({ tipo: 'erro', texto: 'Apenas Administradores podem conceder nível de Administrador.' });
         setLoading(false);
         return;
       }
 
-      // REGRA OBRIGATÓRIA MULTI-TENANT: Todo operador deve ser vinculado a um condomínio específico
-      let targetCondominioId: string | null = !eAdmin
-        ? (usuarioLogado?.condominio_id || null)
-        : ((condominioIdOperador && condominioIdOperador !== 'todos' && condominioIdOperador !== 'global')
-            ? condominioIdOperador
-            : (condoAtivoId || condominioFiltroAdmin || usuarioLogado?.condominio_id || null));
+      // Regra C: Apenas Administrador Global pode conceder acesso_global_condominios
+      const acessoGlobalFinal = eAdminGlobal ? Boolean(acessoGlobalOperador) : false;
+      if (!eAdminGlobal && acessoGlobalOperador) {
+        setMensagem({ tipo: 'erro', texto: 'Somente um Administrador Geral pode conceder acesso global a múltiplos condomínios.' });
+        setLoading(false);
+        return;
+      }
 
-      if (targetCondominioId === 'todos' || targetCondominioId === 'global') {
-        const primeiroValido = condominios.find(c => c.id && c.id !== 'global' && c.id !== 'todos')?.id;
+      const ehSupervisorAlvo =
+        nivelNum === 2 ||
+        perfilStr.toLowerCase() === 'supervisor' ||
+        (funcaoOperador === 'Outro' ? funcaoCustomizada : funcaoOperador).toLowerCase().includes('supervisor');
+
+      // REGRA OBRIGATÓRIA MULTI-TENANT: Todo operador deve estar vinculado a condomínio(s) válido(s)
+      let targetCondominioId: string | null = isCondominioIdValido(condominioIdOperador)
+        ? condominioIdOperador
+        : (isCondominioIdValido(condoAtivoId) ? condoAtivoId : (usuarioLogado?.condominio_id || null));
+
+      if (!eAdminGlobal && !eSupervisor) {
+        targetCondominioId = condoAtivoId || usuarioLogado?.condominio_id || null;
+      }
+
+      if (!isCondominioIdValido(targetCondominioId)) {
+        const primeiroValido = condominios.find(c => isCondominioIdValido(c.id))?.id;
         targetCondominioId = primeiroValido || null;
       }
 
       if (!targetCondominioId) {
-        setMensagem({ tipo: 'erro', texto: 'Selecione obrigatoriamente o condomínio ao qual este operador pertence.' });
+        setMensagem({ tipo: 'erro', texto: 'Selecione obrigatoriamente o condomínio principal ao qual este operador pertence.' });
         setLoading(false);
         return;
       }
+
+      // Regra B vs Regra A: Supervisor pode ter N vínculos explícitos; Porteiro/Síndico ficam restritos ao condomínio principal
+      const condominiosPermitidosFinais = ehSupervisorAlvo
+        ? Array.from(new Set([targetCondominioId, ...condominiosVinculadosOperador].filter(id => isCondominioIdValido(id))))
+        : [targetCondominioId];
 
       const unidadeFinal = (unidadeOperador.trim().toUpperCase() === 'TODAS' || unidadeOperador.trim() === '*' || !unidadeOperador.trim())
         ? 'TODAS'
@@ -1512,10 +1655,43 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
         unidade: unidadeFinal
       };
 
+      // Provisiona / atualiza credencial no Supabase Auth via backend seguro quando e-mail ou senha informados
+      let authUserIdResolvido: string | null = authUserIdEdicao;
+      if (!idEdicao || senhaLimpa || (emailLimpo && !authUserIdEdicao)) {
+        const token = await obterAccessTokenAtual();
+        if (!token) {
+          throw new Error('Sessão Auth expirada. Faça login novamente para provisionar credenciais.');
+        }
+        const respProvision = await fetch('/api/admin/operadores/provisionar', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            operador_id: idEdicao || undefined,
+            auth_user_id: authUserIdEdicao || undefined,
+            email: emailLimpo,
+            password: senhaLimpa || undefined,
+            nome: nomeOperador.trim(),
+            condominio_id: targetCondominioId
+          })
+        });
+        const provData = await respProvision.json().catch(() => ({}));
+        if (!respProvision.ok) {
+          throw new Error(provData?.error || 'Falha ao provisionar usuário no Supabase Auth.');
+        }
+        if (provData?.auth_user_id) {
+          authUserIdResolvido = provData.auth_user_id;
+        }
+      }
+
       if (idEdicao) {
         const dadosAtualizacao: any = {
           nome: nomeOperador.trim(),
           login: loginOperador.trim().toLowerCase(),
+          email: emailLimpo || null,
+          auth_user_id: authUserIdResolvido || null,
           nivel_acesso: nivelNum,
           nivel_acesso_custom_id: customId,
           perfil: perfilStr,
@@ -1523,18 +1699,20 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
           cargo: funcaoFinal,
           foto_url: fotoOperador || null,
           condominio_id: targetCondominioId,
+          acesso_global_condominios: acessoGlobalFinal,
           permissoes: permissoesFinais,
           unidade: unidadeFinal,
           ativo: Boolean(ativoOperador)
         };
-        if (senhaOperador.trim()) {
-          dadosAtualizacao.senha = senhaOperador.trim();
-        }
 
-        let { error } = await supabase
+        let updateQuery = supabase
           .from('operadores')
           .update(dadosAtualizacao)
           .eq('id', idEdicao);
+        if (!eAdminGlobal && !eSupervisor && isCondominioIdValido(targetCondominioId)) {
+          updateQuery = updateQuery.eq('condominio_id', targetCondominioId);
+        }
+        let { error } = await updateQuery;
 
         if (error && (
           error.message?.includes('permissoes') ||
@@ -1542,12 +1720,15 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
           error.message?.includes('perfil') || 
           error.message?.includes('funcao') || 
           error.message?.includes('cargo') || 
+          error.message?.includes('email') ||
+          error.message?.includes('auth_user_id') ||
+          error.message?.includes('acesso_global_condominios') ||
           error.message?.includes('schema cache') || 
           error.message?.includes('column') || 
           (error as any).code === '42703' ||
           (error as any).code === 'PGRST204'
         )) {
-          console.warn('Fallback: salvando operador sem colunas extras de RBAC/permissoes/funcao...');
+          console.warn('Fallback: salvando operador sem colunas extras...');
           const fallback: any = {
             nome: nomeOperador.trim(),
             login: loginOperador.trim().toLowerCase(),
@@ -1556,12 +1737,13 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
             condominio_id: targetCondominioId,
             ativo: Boolean(ativoOperador)
           };
-          if (dadosAtualizacao.senha) fallback.senha = dadosAtualizacao.senha;
           const retry = await supabase.from('operadores').update(fallback).eq('id', idEdicao);
           error = retry.error;
         }
 
         if (error) throw error;
+
+        await sincronizarVinculosOperadorCondominio(idEdicao, targetCondominioId, condominiosPermitidosFinais);
 
         // Persiste as permissões no storage/estado instantâneo do operador (por ID e Login)
         await salvarPermissoesOperador(idEdicao, permissoesFinais, loginOperador.trim().toLowerCase());
@@ -1570,49 +1752,27 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
           localStorage.setItem(`infport_sindica_unidade_${loginOperador.trim().toLowerCase()}`, unidadeFinal);
           localStorage.setItem(`porttohub_operador_funcao_${idEdicao}`, funcaoFinal);
           localStorage.setItem(`porttohub_operador_funcao_${loginOperador.trim().toLowerCase()}`, funcaoFinal);
-          try {
-            const sessaoRaw = localStorage.getItem('infport_sessao_operador');
-            if (sessaoRaw) {
-              const sessao = JSON.parse(sessaoRaw);
-              if (sessao.operador && (sessao.operador.id === idEdicao || sessao.operador.login?.toLowerCase() === loginOperador.trim().toLowerCase())) {
-                sessao.operador.funcao = funcaoFinal;
-                sessao.operador.cargo = funcaoFinal;
-                sessao.operador.nome = nomeOperador.trim();
-                localStorage.setItem('infport_sessao_operador', JSON.stringify(sessao));
-                window.dispatchEvent(new CustomEvent('infport_sessao_atualizada', { detail: sessao }));
-              }
-            }
-          } catch {}
         }
 
-        // Atualiza estado local e cache sincronizado preservando as permissões granulares e a função
-        setOperadores(prev => {
-          const atualizados = prev.map(o => o.id === idEdicao ? { 
-            ...o, 
-            ...dadosAtualizacao, 
-            funcao: funcaoFinal,
-            cargo: funcaoFinal,
-            permissoes: permissoesFinais, 
-            unidade: unidadeFinal,
-            ativo: Boolean(ativoOperador) 
-          } : o);
-          salvarCacheLocal('operadores', atualizados, 'global');
-          return atualizados;
-        });
+        invalidarCacheTabela('operadores', targetCondominioId);
+        setOperadores(prev => prev.map(o => o.id === idEdicao ? { 
+          ...o, 
+          ...dadosAtualizacao, 
+          funcao: funcaoFinal,
+          cargo: funcaoFinal,
+          permissoes: permissoesFinais, 
+          unidade: unidadeFinal,
+          ativo: Boolean(ativoOperador) 
+        } : o));
         window.dispatchEvent(new CustomEvent('operadores_atualizados'));
 
-        setMensagem({ tipo: 'sucesso', texto: `Operador e função (${funcaoFinal}) atualizados com sucesso!` });
+        setMensagem({ tipo: 'sucesso', texto: `Operador (${funcaoFinal}) atualizado com sucesso!` });
       } else {
-        if (!senhaOperador.trim()) {
-          setMensagem({ tipo: 'erro', texto: 'Informe a senha para o novo operador.' });
-          setLoading(false);
-          return;
-        }
-
         const novoOp: any = {
           nome: nomeOperador.trim(),
           login: loginOperador.trim().toLowerCase(),
-          senha: senhaOperador.trim(),
+          email: emailLimpo,
+          auth_user_id: authUserIdResolvido || null,
           nivel_acesso: nivelNum,
           nivel_acesso_custom_id: customId,
           perfil: perfilStr,
@@ -1620,6 +1780,7 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
           cargo: funcaoFinal,
           foto_url: fotoOperador || null,
           condominio_id: targetCondominioId,
+          acesso_global_condominios: acessoGlobalFinal,
           permissoes: permissoesFinais,
           ativo: Boolean(ativoOperador)
         };
@@ -1632,16 +1793,18 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
           error.message?.includes('perfil') || 
           error.message?.includes('funcao') || 
           error.message?.includes('cargo') || 
+          error.message?.includes('email') ||
+          error.message?.includes('auth_user_id') ||
+          error.message?.includes('acesso_global_condominios') ||
           error.message?.includes('schema cache') || 
           error.message?.includes('column') || 
           (error as any).code === '42703' ||
           (error as any).code === 'PGRST204'
         )) {
-          console.warn('Fallback: cadastrando operador sem colunas extras de RBAC/permissoes/funcao...');
+          console.warn('Fallback: cadastrando operador sem colunas extras...');
           const fallbackOp = {
             nome: novoOp.nome,
             login: novoOp.login,
-            senha: novoOp.senha,
             nivel_acesso: novoOp.nivel_acesso,
             condominio_id: novoOp.condominio_id,
             ativo: Boolean(ativoOperador)
@@ -1653,32 +1816,24 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
 
         if (error) throw error;
 
-        const opIdSalvo = opCriado?.id || novoOp.login;
-        await salvarPermissoesOperador(opIdSalvo, permissoesOperador, novoOp.login);
+        const opIdSalvo = opCriado?.id;
+        if (opIdSalvo) {
+          await sincronizarVinculosOperadorCondominio(opIdSalvo, targetCondominioId, condominiosPermitidosFinais);
+        }
+
+        await salvarPermissoesOperador(opIdSalvo || novoOp.login, permissoesOperador, novoOp.login);
         if (typeof localStorage !== 'undefined') {
           if (opIdSalvo) localStorage.setItem(`porttohub_operador_funcao_${opIdSalvo}`, funcaoFinal);
           if (novoOp.login) localStorage.setItem(`porttohub_operador_funcao_${novoOp.login.toLowerCase()}`, funcaoFinal);
         }
 
-        const opFinalParaEstado = {
-          ...(opCriado || novoOp),
-          funcao: funcaoFinal,
-          cargo: funcaoFinal,
-          permissoes: permissoesOperador
-        };
-
-        setOperadores(prev => {
-          const atualizados = [...prev.filter(o => o.id !== opFinalParaEstado.id), opFinalParaEstado];
-          salvarCacheLocal('operadores', atualizados, 'global');
-          return atualizados;
-        });
+        invalidarCacheTabela('operadores', targetCondominioId);
         window.dispatchEvent(new CustomEvent('operadores_atualizados'));
-
-        setMensagem({ tipo: 'sucesso', texto: `Operador com função (${funcaoFinal}) cadastrado com sucesso!` });
+        setMensagem({ tipo: 'sucesso', texto: `Operador (${funcaoFinal}) cadastrado e vinculado ao Auth com sucesso!` });
       }
 
       voltarParaLista();
-      carregarDados();
+      await carregarDados();
       setTimeout(() => setMensagem({ tipo: '', texto: '' }), 4000);
     } catch (err: any) {
       setMensagem({ tipo: 'erro', texto: `Erro ao salvar operador: ${err.message}` });
@@ -1691,17 +1846,18 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     setAtivoOperador(novoAtivo);
     if (idEdicao) {
       try {
-        const { error } = await supabase
+        let q = supabase
           .from('operadores')
           .update({ ativo: novoAtivo })
           .eq('id', idEdicao);
+        if (!eAdminGlobal && isCondominioIdValido(condominioIdOperador || condoAtivoId)) {
+          q = q.eq('condominio_id', condominioIdOperador || condoAtivoId);
+        }
+        const { error } = await q;
         if (error) throw error;
 
-        setOperadores(prev => {
-          const atualizados = prev.map(o => o.id === idEdicao ? { ...o, ativo: novoAtivo } : o);
-          salvarCacheLocal('operadores', atualizados, 'global');
-          return atualizados;
-        });
+        invalidarCacheTabela('operadores', condominioIdOperador || condoAtivoId);
+        setOperadores(prev => prev.map(o => o.id === idEdicao ? { ...o, ativo: novoAtivo } : o));
         window.dispatchEvent(new CustomEvent('operadores_atualizados'));
         setMensagem({
           tipo: 'sucesso',
@@ -1722,17 +1878,17 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     setIdEdicao(op.id);
     setNomeOperador(op.nome || '');
     setLoginOperador(op.login || '');
+    setEmailOperador(op.email || '');
+    setNovaSenhaAuth('');
+    setMostrarNovaSenhaAuth(false);
+    setAuthUserIdEdicao(op.auth_user_id || null);
     setFotoOperador(op.foto_url || '');
+    setAcessoGlobalOperador(op.acesso_global_condominios === true);
+    const cidPrincipal = isCondominioIdValido(op.condominio_id) ? op.condominio_id : (condoAtivoId || '');
+    setCondominioIdOperador(cidPrincipal);
+    const linksAtuais = mapaVinculosOperadores[op.id] || (isCondominioIdValido(cidPrincipal) ? [cidPrincipal] : []);
+    setCondominiosVinculadosOperador(linksAtuais);
 
-    // Administrador Master consegue ver a senha de todos os operadores ao abrir editar
-    if (eAdmin) {
-      setSenhaOperador(op.senha || '');
-    } else {
-      setSenhaOperador('');
-    }
-    setMostrarSenhaOperador(false);
-    setCamposSenhaOcultosEdicao(true); // Oculta os campos de senha na interface de edição por padrão
-    setSenhaCopiada(false);
     const nivelDefinido = op.nivel_acesso_custom_id ||
       (op.nivel_acesso !== undefined && op.nivel_acesso !== null && !isNaN(Number(op.nivel_acesso)) ? `nivel_${op.nivel_acesso}` : null) ||
       (op.perfil === 'admin' ? 'nivel_0' : op.perfil === 'master' ? 'nivel_1' : op.perfil === 'supervisor' ? 'nivel_2' : (op.perfil === 'sindico' || op.perfil === 'Síndico') ? 'nivel_4' : 'nivel_3');
@@ -1766,16 +1922,17 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
   const alternarStatusOperador = async (op: any) => {
     const novoStatus = !(op.ativo !== false);
     try {
-      const { error } = await supabase
+      let q = supabase
         .from('operadores')
         .update({ ativo: novoStatus })
         .eq('id', op.id);
+      if (!eAdminGlobal && isCondominioIdValido(op.condominio_id || condoAtivoId)) {
+        q = q.eq('condominio_id', op.condominio_id || condoAtivoId);
+      }
+      const { error } = await q;
       if (error) throw error;
-      setOperadores(prev => {
-        const atualizados = prev.map(item => item.id === op.id ? { ...item, ativo: novoStatus } : item);
-        salvarCacheLocal('operadores', atualizados, 'global');
-        return atualizados;
-      });
+      invalidarCacheTabela('operadores', op.condominio_id || condoAtivoId);
+      setOperadores(prev => prev.map(item => item.id === op.id ? { ...item, ativo: novoStatus } : item));
       window.dispatchEvent(new CustomEvent('operadores_atualizados'));
       setMensagem({
         tipo: 'sucesso',
@@ -1959,7 +2116,11 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
     const m = moradorParaExcluir;
     setLoading(true);
     try {
-      const { error } = await supabase.from('moradores').delete().eq('id', m.id);
+      let delQuery = supabase.from('moradores').delete().eq('id', m.id);
+      if (!eAdminGlobal && isCondominioIdValido(m.condominio_id || condoAtivoId)) {
+        delQuery = delQuery.eq('condominio_id', m.condominio_id || condoAtivoId);
+      }
+      const { error } = await delQuery;
       if (error) throw error;
       invalidarCacheTabela('moradores', m.condominio_id || condoAtivoId);
       setMensagem({ tipo: 'sucesso', texto: `Morador "${m.nome}" removido com sucesso!` });
@@ -3400,205 +3561,75 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
                 </div>
               </div>
 
-              {/* Card 2: Credenciais & Nível de Permissão */}
+              {/* Card 2: Credenciais Auth & Nível de Permissão */}
               <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-sm space-y-5">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
                   <div className="flex items-center gap-3">
                     <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
                       <Key className="w-5 h-5" />
                     </div>
                     <div>
                       <h3 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-wider">
-                        Credenciais de Acesso & Nível RBAC
+                        Credenciais Supabase Auth & Nível RBAC
                       </h3>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
-                        {idEdicao ? 'Gestão de credenciais, senha de acesso e perfil' : 'Defina os dados de login e perfil do novo operador'}
+                        Autenticação criptografada (sem armazenamento de senha em texto simples)
                       </p>
                     </div>
                   </div>
-
-                  {idEdicao && eAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const novoEstado = !camposSenhaOcultosEdicao;
-                        setCamposSenhaOcultosEdicao(novoEstado);
-                        if (!novoEstado) {
-                          setMostrarSenhaOperador(true);
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700/80 active:scale-95 shadow-2xs"
-                      title={camposSenhaOcultosEdicao ? 'Exibir e gerenciar campos de senha' : 'Ocultar campos de senha'}
-                    >
-                      {camposSenhaOcultosEdicao ? (
-                        <>
-                          <Eye className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                          <span>Ver Senha</span>
-                        </>
-                      ) : (
-                        <>
-                          <EyeOff className="w-3.5 h-3.5 text-slate-500" />
-                          <span>Ocultar Senha</span>
-                        </>
-                      )}
-                    </button>
+                  {idEdicao && (
+                    <span className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border ${
+                      authUserIdEdicao
+                        ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                        : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
+                    }`}>
+                      {authUserIdEdicao ? '✓ Vinculado ao Supabase Auth' : '⚠️ Sem vínculo Auth ainda'}
+                    </span>
                   )}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Bloco de Senha de Acesso com Proteção e Visibilidade para Admin */}
                   <div>
-                    {idEdicao ? (
-                      // Modo Edição de Operador
-                      !eAdmin ? (
-                        // Para não-administradores: campos de senha ocultos por segurança
-                        <div className="p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-xl space-y-1">
-                          <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
-                            Senha de Acesso
-                          </label>
-                          <div className="flex items-center gap-2 pt-1 text-slate-500 dark:text-slate-400 text-xs">
-                            <Lock className="w-4 h-4 text-slate-400 shrink-0" />
-                            <span className="font-semibold">Campos de senha ocultos por segurança</span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 dark:text-slate-500">
-                            Apenas o Administrador Master tem permissão para visualizar e redefinir senhas.
-                          </p>
-                        </div>
-                      ) : camposSenhaOcultosEdicao ? (
-                        // Para Administrador: campos de senha ocultos por padrão na interface de edição
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
-                            Senha de Acesso do Operador
-                          </label>
-                          <div className="p-3 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span className="font-mono text-xs font-black tracking-widest text-slate-500 dark:text-slate-400">
-                                ••••••••••••
-                              </span>
-                              <span className="px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800/60 text-[10px] font-extrabold uppercase">
-                                Oculto
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setCamposSenhaOcultosEdicao(false);
-                                  setMostrarSenhaOperador(true);
-                                }}
-                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white rounded-lg text-xs font-black transition flex items-center gap-1.5 cursor-pointer shadow-xs shadow-blue-600/30"
-                                title="Visualizar a senha cadastrada deste operador (Exclusivo Administrador)"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                <span>Ver Senha</span>
-                              </button>
-                              {senhaOperador && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(senhaOperador);
-                                    setSenhaCopiada(true);
-                                    setTimeout(() => setSenhaCopiada(false), 2500);
-                                  }}
-                                  className="px-2.5 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
-                                  title="Copiar senha cadastrada"
-                                >
-                                  {senhaCopiada ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                                  <span>{senhaCopiada ? 'Copiada!' : 'Copiar'}</span>
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                          <p className="text-[11px] text-slate-400 dark:text-slate-500">
-                            Campos de senha ocultos por padrão na interface de edição. Clique em "Ver Senha" para exibir.
-                          </p>
-                        </div>
-                      ) : (
-                        // Para Administrador: senha exibida e editável
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
-                              Senha de Acesso (Visível para o Admin)
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setCamposSenhaOcultosEdicao(true);
-                                setMostrarSenhaOperador(false);
-                              }}
-                              className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 underline cursor-pointer"
-                            >
-                              Ocultar campo
-                            </button>
-                          </div>
-                          <div className="relative">
-                            <input
-                              type={mostrarSenhaOperador ? 'text' : 'password'}
-                              value={senhaOperador}
-                              onChange={(e) => setSenhaOperador(e.target.value)}
-                              placeholder="Digite nova senha para alterar"
-                              className="w-full p-3 pr-20 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:bg-white dark:focus:bg-slate-900 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none transition font-mono"
-                            />
-                            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                              {senhaOperador && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(senhaOperador);
-                                    setSenhaCopiada(true);
-                                    setTimeout(() => setSenhaCopiada(false), 2500);
-                                  }}
-                                  className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg transition cursor-pointer"
-                                  title="Copiar senha"
-                                >
-                                  {senhaCopiada ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => setMostrarSenhaOperador(!mostrarSenhaOperador)}
-                                className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg transition cursor-pointer"
-                                title={mostrarSenhaOperador ? 'Ocultar caracteres' : 'Mostrar caracteres'}
-                              >
-                                {mostrarSenhaOperador ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                              </button>
-                            </div>
-                          </div>
-                          <div className="flex items-center justify-between text-[11px] text-slate-500">
-                            <span>✓ Senha do operador carregada para o Admin Master</span>
-                            <span className="font-mono text-slate-400">Tamanho: {senhaOperador.length} caracteres</span>
-                          </div>
-                        </div>
-                      )
-                    ) : (
-                      // Modo Criação de Novo Operador
-                      <div>
-                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1.5">
-                          Senha de Acesso *
-                        </label>
-                        <div className="relative">
-                          <input
-                            type={mostrarSenhaOperador ? 'text' : 'password'}
-                            required
-                            value={senhaOperador}
-                            onChange={(e) => setSenhaOperador(e.target.value)}
-                            placeholder="Digite a senha do novo operador"
-                            className="w-full p-3 pr-11 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:bg-white dark:focus:bg-slate-900 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none transition"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setMostrarSenhaOperador(!mostrarSenhaOperador)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-1 rounded-lg transition cursor-pointer"
-                            title={mostrarSenhaOperador ? 'Ocultar senha' : 'Ver senha'}
-                          >
-                            {mostrarSenhaOperador ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1.5">
+                      E-mail de Acesso (Supabase Auth) {!idEdicao && '*'}
+                    </label>
+                    <input
+                      type="email"
+                      required={!idEdicao}
+                      value={emailOperador}
+                      onChange={(e) => setEmailOperador(e.target.value.trim().toLowerCase())}
+                      placeholder="Ex: marcos.porteiro@condominio.com"
+                      className="w-full p-3 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none transition"
+                    />
                   </div>
 
                   <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1.5">
+                      {idEdicao ? 'Redefinir Senha Auth (opcional, mín. 6 chars)' : 'Senha Inicial Auth (mín. 6 chars) *'}
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={mostrarNovaSenhaAuth ? 'text' : 'password'}
+                        required={!idEdicao}
+                        minLength={idEdicao ? undefined : 6}
+                        value={novaSenhaAuth}
+                        onChange={(e) => setNovaSenhaAuth(e.target.value)}
+                        placeholder={idEdicao ? 'Deixe em branco para manter a senha atual' : 'Mínimo de 6 caracteres'}
+                        autoComplete="new-password"
+                        className="w-full p-3 pr-11 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:bg-white dark:focus:bg-slate-900 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none transition"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setMostrarNovaSenhaAuth(!mostrarNovaSenhaAuth)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-1 rounded-lg transition cursor-pointer"
+                        title={mostrarNovaSenhaAuth ? 'Ocultar senha digitada' : 'Visualizar senha digitada'}
+                      >
+                        {mostrarNovaSenhaAuth ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-2">
                     <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1.5">
                       Nível de Acesso / Perfil *
                     </label>
@@ -3608,7 +3639,7 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
                       className="w-full p-3 bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-bold text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none transition cursor-pointer"
                     >
                       {listaNiveis.map((n) => {
-                        if (n.id === 'nivel_0' && !eAdmin && nivelAcesso !== '0' && nivelAcesso !== 'nivel_0') {
+                        if (n.id === 'nivel_0' && !eAdminGlobal && nivelAcesso !== '0' && nivelAcesso !== 'nivel_0') {
                           return null;
                         }
                         return (
@@ -3632,19 +3663,50 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
                     <h3 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-wider">
                       Vínculo Condominial & Status da Conta
                     </h3>
+                  </div>
+                </div>
 
+                {/* Resumo visual legível do vínculo atual */}
+                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">Perfil / Função</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-100">
+                      {obterNomeNivel(nivelAcesso, listaNiveis)} · {funcaoOperador === 'Outro' ? (funcaoCustomizada || 'Operador') : funcaoOperador}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">Condomínio Principal</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-100">
+                      {getNomeCondominioPorId(condominioIdOperador)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">Condomínios Autorizados</span>
+                    <span className="font-bold text-blue-600 dark:text-blue-400">
+                      {acessoGlobalOperador
+                        ? 'Todos os Condomínios (Global)'
+                        : (nivelAcesso === 'nivel_2' || funcaoOperador === 'Supervisor')
+                          ? `${Array.from(new Set([condominioIdOperador, ...condominiosVinculadosOperador].filter(Boolean))).length} vinculado(s)`
+                          : getNomeCondominioPorId(condominioIdOperador)}
+                    </span>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {eAdmin && (
+                  {(eAdminGlobal || eSupervisor) && (
                     <div className="md:col-span-2">
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1.5">
-                        Condomínio Vinculado *
+                        Condomínio Principal *
                       </label>
                       <select
                         value={condominioIdOperador}
-                        onChange={(e) => setCondominioIdOperador(e.target.value)}
+                        onChange={(e) => {
+                          const cid = e.target.value;
+                          setCondominioIdOperador(cid);
+                          if (cid && !condominiosVinculadosOperador.includes(cid)) {
+                            setCondominiosVinculadosOperador(prev => [...prev, cid]);
+                          }
+                        }}
                         required
                         className="w-full p-3 rounded-xl text-sm font-bold bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none transition cursor-pointer"
                       >
@@ -3653,6 +3715,68 @@ export default function Cadastros({ usuarioLogado, condominioAtivoProp, onTrocar
                           <option key={c.id} value={c.id}>🏢 {c.nome}</option>
                         ))}
                       </select>
+                    </div>
+                  )}
+
+                  {(nivelAcesso === 'nivel_2' || funcaoOperador === 'Supervisor') && (
+                    <div className="md:col-span-2 space-y-2 p-4 rounded-xl bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800/60">
+                      <label className="block text-xs font-black text-blue-900 dark:text-blue-200 uppercase tracking-wider">
+                        Condomínios Autorizados para Supervisão (operador_condominios)
+                      </label>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                        Supervisores acessam exclusivamente os condomínios marcados abaixo.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                        {condominios.map((c) => {
+                          const marcado = c.id === condominioIdOperador || condominiosVinculadosOperador.includes(c.id);
+                          return (
+                            <label
+                              key={c.id}
+                              className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-xs font-bold cursor-pointer transition ${
+                                marcado
+                                  ? 'bg-blue-600 text-white border-blue-600'
+                                  : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={marcado}
+                                disabled={c.id === condominioIdOperador}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setCondominiosVinculadosOperador(prev => Array.from(new Set([...prev, c.id])));
+                                  } else {
+                                    setCondominiosVinculadosOperador(prev => prev.filter(id => id !== c.id));
+                                  }
+                                }}
+                                className="rounded"
+                              />
+                              <span className="truncate">{c.nome} {c.id === condominioIdOperador ? '(Principal)' : ''}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {eAdminGlobal && (
+                    <div className="md:col-span-2 p-4 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-2">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={acessoGlobalOperador}
+                          onChange={(e) => setAcessoGlobalOperador(e.target.checked)}
+                          className="w-4 h-4 rounded accent-amber-600"
+                        />
+                        <div>
+                          <span className="text-xs font-black text-amber-900 dark:text-amber-200 uppercase block">
+                            Conceder Acesso Global a Todos os Condomínios (acesso_global_condominios)
+                          </span>
+                          <span className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                            Permissão restrita: apenas administradores gerais explícitos podem alternar entre todos os condomínios.
+                          </span>
+                        </div>
+                      </label>
                     </div>
                   )}
 

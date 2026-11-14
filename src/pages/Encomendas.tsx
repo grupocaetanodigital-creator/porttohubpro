@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { supabase } from '../services/supabase';
+import { supabase, obterAccessTokenAtual } from '../services/supabase';
 import { registrarAtividade } from '../services/auditoriaService';
 import { uploadFotoComprimidaStorage, comprimirImagemBase64, formatarUrlFoto } from '../services/imageUtils';
 import { 
@@ -261,6 +261,8 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
   const [blocoTriagem, setBlocoTriagem] = useState('');
   const [moradoresDaUnidade, setMoradoresDaUnidade] = useState<any[]>([]);
   const [moradorSelecionado, setMoradorSelecionado] = useState<any | null>(null);
+  const [confirmadoMoradorUnico, setConfirmadoMoradorUnico] = useState<boolean>(false);
+  const operationBatchIdRef = useRef<string>('');
   const [codigoBarras, setCodigoBarras] = useState('');
   const [fotoEtiquetaUrl, setFotoEtiquetaUrl] = useState('');
   const [observacoes, setObservacoes] = useState('');
@@ -955,6 +957,7 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
       const { publicUrl, tamanhoOriginalKb, tamanhoComprimidoKb, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta: pastaDestino,
+        condominioId: idCondominioAtivo || condominioNovoLoteId || usuarioLogado?.condominio_id,
         maxWidth: 1000,
         maxHeight: 1000,
         qualidade: 0.75
@@ -1007,9 +1010,15 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
       const controller = new AbortController();
       const timeoutTimer = setTimeout(() => controller.abort(), 4800);
 
+      const token = await obterAccessTokenAtual();
+      const headersOcr: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headersOcr.Authorization = `Bearer ${token}`;
+      }
+
       const resp = await fetch('/api/ocr-etiqueta', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headersOcr,
         body: JSON.stringify({ imagemBase64: base64 }),
         signal: controller.signal
       });
@@ -2002,13 +2011,15 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
     );
     setMoradoresDaUnidade(moradoresEncontrados);
 
-    // Regra obrigatória: auto-seleção SOMENTE quando existir exatamente 1 morador na unidade.
-    // Quando houver múltiplos moradores, exige escolha explícita do porteiro (nunca seleciona moradoresEncontrados[0] por padrão).
+    // Regra obrigatória: 1 morador pré-seleciona e exige confirmação simples antes de salvar;
+    // >= 2 moradores exige escolha explícita antes de salvar.
     if (moradoresEncontrados.length === 1) {
       const unicoMorador = moradoresEncontrados[0];
       setMoradorSelecionado(unicoMorador);
+      setConfirmadoMoradorUnico(false);
       setEncomendasAdicionais((prev) => prev.map((it) => ({ ...it, moradorId: unicoMorador.id })));
     } else if (moradoresEncontrados.length > 1) {
+      setConfirmadoMoradorUnico(false);
       setMoradorSelecionado((prev: any) =>
         prev && moradoresEncontrados.some((m) => String(m.id) === String(prev.id))
           ? moradoresEncontrados.find((m) => String(m.id) === String(prev.id)) || null
@@ -2024,6 +2035,7 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         }))
       );
     } else {
+      setConfirmadoMoradorUnico(false);
       setMoradorSelecionado(null);
       setEncomendasAdicionais((prev) => prev.map((it) => ({ ...it, moradorId: '' })));
     }
@@ -2109,10 +2121,15 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
     setAgrupandoTodosLocais(true);
     try {
       const ids = alertaAgrupamento.itens.map((i: any) => i.id);
-      const { error } = await supabase
+      const condoIdAlvo = idCondominioAtivo || usuarioLogado?.condominio_id || '';
+      let queryAgrupar = supabase
         .from('encomendas_itens')
         .update({ local_armazenamento: novoLocal })
         .in('id', ids);
+      if (condoIdAlvo && condoIdAlvo !== 'todos' && condoIdAlvo !== 'global') {
+        queryAgrupar = queryAgrupar.eq('condominio_id', condoIdAlvo);
+      }
+      const { error } = await queryAgrupar;
 
       if (error && (error.message?.includes('local_armazenamento') || (error as any).code === '42703')) {
         ids.forEach((id: string) => localStorage.setItem(`infport_item_local_${id}`, novoLocal));
@@ -2225,6 +2242,14 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
       condoConfig?.tipo_estrutura
     );
 
+    if (moradoresUnidadeAtual.length === 1 && !confirmadoMoradorUnico) {
+      setMensagem({
+        tipo: 'erro',
+        texto: `Confirme o morador único "${moradoresUnidadeAtual[0].nome}" antes de salvar a encomenda.`
+      });
+      return;
+    }
+
     if (moradoresUnidadeAtual.length > 1 && !moradorSelecionado?.id) {
       setMensagem({
         tipo: 'erro',
@@ -2262,16 +2287,18 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
       }
     }
 
+    if (loading) return;
     setLoading(true);
 
     try {
-      // Se já existiam pacotes retidos para esta unidade e o operador definiu um novo local, agrupa todos no novo local
+      // Se já existiam pacotes retidos para esta unidade e o operador definiu um novo local, agrupa todos no novo local (escopo multi-tenant)
       if (alertaAgrupamento?.itens && alertaAgrupamento.itens.length > 0) {
         const idsAntigos = alertaAgrupamento.itens.map((i: any) => i.id);
         supabase
           .from('encomendas_itens')
           .update({ local_armazenamento: localArmazenar })
           .in('id', idsAntigos)
+          .eq('condominio_id', condoAlvo)
           .then(({ error: errAgrupar }) => {
             if (!errAgrupar) {
               setTodosItensRetidos(prev => prev.map(it => idsAntigos.includes(it.id) ? { ...it, local_armazenamento: localArmazenar } : it));
@@ -2309,8 +2336,17 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
           ? moradoresUnidadeAtual[0].id
           : moradorSelecionado?.id || null;
 
+      if (!operationBatchIdRef.current) {
+        operationBatchIdRef.current =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `batch_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      }
+      const batchId = operationBatchIdRef.current;
+
       const pacotesParaSalvar: any[] = [
         {
+          operation_id: `${batchId}_0`,
           lote_re_id: loteAtivo?.id || null,
           condominio_id: condoAlvo,
           bloco: blocoFinal,
@@ -2322,7 +2358,8 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
           local_armazenamento: localArmazenar,
           status: 'retido'
         },
-        ...adicionaisTratados.map(adic => ({
+        ...adicionaisTratados.map((adic, idx) => ({
+          operation_id: `${batchId}_${idx + 1}`,
           lote_re_id: loteAtivo?.id || null,
           condominio_id: condoAlvo,
           bloco: blocoFinal,
@@ -2339,7 +2376,7 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         }))
       ];
 
-      // Validação autoritativa e gravação segura no Supabase (ou fila offline)
+      // 1. Gravação isolada e idempotente da encomenda no Supabase (ou fila offline)
       const resultadoGravacao = await inserirEncomendasValidadas(pacotesParaSalvar, {
         condominioId: condoAlvo,
         moradoresCondominio: moradores,
@@ -2348,6 +2385,9 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         operadorNome: usuarioLogado?.nome || usuarioLogado?.login || 'Portaria'
       });
 
+      // Só após confirmação de gravação renova o token de lote para próximas encomendas
+      operationBatchIdRef.current = '';
+
       // Se houver lote ativo no estado, atualiza-o com a soma de todos os pacotes
       if (loteAtivo && !resultadoGravacao.offline) {
         const novaQtdTriada = (loteAtivo.qtd_triada || 0) + pacotesParaSalvar.length;
@@ -2355,7 +2395,8 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         await supabase
           .from('lotes_re')
           .update({ qtd_triada: novaQtdTriada, status: novoStatusLote })
-          .eq('id', loteAtivo.id);
+          .eq('id', loteAtivo.id)
+          .eq('condominio_id', condoAlvo);
 
         setLoteAtivo((prev: any) => prev ? ({ ...prev, qtd_triada: novaQtdTriada, status: novoStatusLote }) : null);
       }
@@ -2368,7 +2409,6 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
       const labelUnidadeFormatada = formatarIdentificacaoUnidade(unidadeFinal, blocoFinal, condoConfig?.tipo_estrutura);
       const orientacaoRetirada = eEstruturaCasas ? 'o número da sua casa' : 'seu apartamento e bloco';
 
-      // Registra evento no Histórico Absoluto
       registrarAtividade({
         modulo: 'Encomendas',
         acao: 'CRIAR',
@@ -2386,6 +2426,7 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         condominio_id: condoAlvo
       });
 
+      // 2. Preparação e disparo independente do WhatsApp (falha aqui NUNCA cancela ou duplica a encomenda já salva)
       const nomeOp = usuarioLogado?.nome || usuarioLogado?.login || 'Portaria';
       const dataHoraAgora = new Date().toLocaleString('pt-BR');
 
@@ -2411,25 +2452,38 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
       }
 
       const linkWhatsMorador = formatarLinkWhatsApp(telMorador, textoWhatsMorador);
+      let whatsappStatus: 'enviada' | 'pendente' | 'falhou' = 'pendente';
+      if (!resultadoGravacao.offline) {
+        try {
+          if (!telMorador) {
+            whatsappStatus = 'pendente';
+          } else {
+            const disparou = dispararLinkWhatsApp(linkWhatsMorador);
+            whatsappStatus = disparou ? 'enviada' : 'falhou';
+          }
+        } catch {
+          whatsappStatus = 'falhou';
+        }
+      } else {
+        whatsappStatus = 'pendente';
+      }
 
       setItemTriadoWhats({
         destinatario: pacotesParaSalvar.length > 1 ? `${nomeDestinatario} (${pacotesParaSalvar.length} pacotes)` : nomeDestinatario,
-        link: linkWhatsMorador
+        link: linkWhatsMorador,
+        whatsappStatus,
+        semTelefone: !telMorador
       });
 
-      // Disparo único e consolidado via WhatsApp direto sem modal intrusivo
-      dispararLinkWhatsApp(linkWhatsMorador);
-
-      setUnidadeTriagem(''); setBlocoTriagem(eEstruturaCasas ? 'Casa' : ''); setMoradorSelecionado(null); setMoradoresDaUnidade([]);
+      setUnidadeTriagem(''); setBlocoTriagem(eEstruturaCasas ? 'Casa' : ''); setMoradorSelecionado(null); setMoradoresDaUnidade([]); setConfirmadoMoradorUnico(false);
       setCodigoBarras(''); setFotoEtiquetaUrl(''); setObservacoes('');
       setSugestoesCodigosOcr([]); setCodigoSelecionadoOcr(''); setOcrDadosDetectados(null);
       setAlertaAgrupamento(null);
       setEncomendasAdicionais([]);
       setAlvoCapturaCamera('principal');
 
-      // Fecha o modal de entrada e retorna diretamente para o menu de entrega de pacotes aos moradores
       setModalEntradaAberta(false);
-      setEtapa('3'); // Menu de Entrega de Pacotes / Baixa
+      setEtapa('3');
       setTipoFiltroBuscaBaixa('unidade');
       setBuscaBaixaGeral(unidadeFinal);
 
@@ -2439,11 +2493,13 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         setTodosItensRetidos(prev => [...resultadoGravacao.data, ...prev]);
       }
 
-      setMensagem({ 
-        tipo: 'sucesso', 
+      setMensagem({
+        tipo: 'sucesso',
         texto: resultadoGravacao.offline
-          ? `✅ ${pacotesParaSalvar.length} encomenda(s) salva(s) na fila offline com validação segura!`
-          : `✅ ${pacotesParaSalvar.length} encomenda(s) registrada(s) com sucesso! Notificação consolidada enviada para ${nomeDestinatario}.`
+          ? `✅ Encomenda salva na fila offline (${pacotesParaSalvar.length} pacote(s)). WhatsApp pendente até reconectar.`
+          : whatsappStatus === 'enviada'
+            ? `✅ Encomenda salva (${pacotesParaSalvar.length} pacote(s)) · Notificação WhatsApp aberta para ${nomeDestinatario}.`
+            : `✅ Encomenda salva com segurança (${pacotesParaSalvar.length} pacote(s)) · WhatsApp pendente (${!telMorador ? 'morador sem telefone cadastrado' : 'clique no botão para reenviar'}).`
       });
     } catch (err: any) {
       setMensagem({ tipo: 'erro', texto: err.message });
@@ -2490,10 +2546,15 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         return;
       }
 
-      const { error } = await supabase
+      const condoAlvoLocal = idCondominioAtivo || usuarioLogado?.condominio_id || '';
+      let updateLocalQ = supabase
         .from('encomendas_itens')
         .update({ local_armazenamento: novoLocalSelecionado })
         .in('id', idsParaAtualizar);
+      if (condoAlvoLocal) {
+        updateLocalQ = updateLocalQ.eq('condominio_id', condoAlvoLocal);
+      }
+      const { error } = await updateLocalQ;
 
       if (error && (error.message?.includes('local_armazenamento') || (error as any).code === '42703' || error.message?.includes('schema cache'))) {
         console.warn('[INFPORT] Coluna local_armazenamento ausente no Supabase. Atualizando localmente no navegador...');
@@ -3067,6 +3128,7 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
           const uploadRes = await uploadFotoComprimidaStorage({
             file: blobAssinatura,
             pasta: 'assinaturas_encomendas',
+            condominioId: idCondominioAtivo || usuarioLogado?.condominio_id,
             maxWidth: 900,
             maxHeight: 450,
             qualidade: 0.85
@@ -3091,10 +3153,15 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
         operador_baixa_id: usuarioLogado?.login || usuarioLogado?.id || 'Operador'
       };
 
-      const { error } = await supabase
+      const condoAlvoBaixa = idCondominioAtivo || usuarioLogado?.condominio_id || '';
+      let baixaQ = supabase
         .from('encomendas_itens')
         .update(payloadUpdate)
         .in('id', itensSelecionadosIds);
+      if (condoAlvoBaixa) {
+        baixaQ = baixaQ.eq('condominio_id', condoAlvoBaixa);
+      }
+      const { error } = await baixaQ;
 
       if (error) throw error;
 
@@ -5503,30 +5570,48 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
                 {/* SELETOR DE DESTINATÁRIO */}
                 {unidadeTriagem.trim() && (
                   moradoresDaUnidade.length > 0 ? (
-                    <div className={`space-y-1 p-2 rounded-xl border ${
-                      moradoresDaUnidade.length > 1 && !moradorSelecionado
+                    <div className={`space-y-2 p-2.5 rounded-xl border ${
+                      (moradoresDaUnidade.length > 1 && !moradorSelecionado) || (moradoresDaUnidade.length === 1 && !confirmadoMoradorUnico)
                         ? 'bg-amber-50/90 border-amber-400'
                         : 'bg-blue-50/80 border-blue-200'
                     }`}>
                       <label className="block text-[10px] font-bold text-blue-900 uppercase">
-                        Destinatário (Morador) {moradoresDaUnidade.length > 1 ? '— Escolha obrigatória *' : ''}
+                        Destinatário (Morador) {moradoresDaUnidade.length > 1 ? '— Escolha obrigatória *' : '— Confirmação obrigatória *'}
                       </label>
-                      <select
-                        required={moradoresDaUnidade.length > 1}
-                        className="w-full p-2 bg-white border border-blue-200 rounded-lg text-xs font-semibold text-slate-800"
-                        onChange={(e) => {
-                          const encontrado = moradoresDaUnidade.find(m => String(m.id) === String(e.target.value)) || null;
-                          setMoradorSelecionado(encontrado);
-                        }}
-                        value={moradorSelecionado?.id || ''}
-                      >
-                        {moradoresDaUnidade.length > 1 && (
+                      {moradoresDaUnidade.length === 1 ? (
+                        <div className="space-y-1.5">
+                          <div className="p-2 bg-white border border-blue-200 rounded-lg text-xs font-bold text-slate-800 flex items-center justify-between gap-2">
+                            <span>{moradoresDaUnidade[0].nome}</span>
+                            <span className="text-[11px] font-medium text-slate-500">
+                              Tel: {moradoresDaUnidade[0].telefone || 'Sem tel'}
+                            </span>
+                          </div>
+                          <label className="flex items-center gap-2 text-[11px] font-bold text-slate-800 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={confirmadoMoradorUnico}
+                              onChange={(e) => setConfirmadoMoradorUnico(e.target.checked)}
+                              className="w-4 h-4 rounded accent-emerald-600"
+                            />
+                            <span>Confirmar envio da encomenda para {moradoresDaUnidade[0].nome}</span>
+                          </label>
+                        </div>
+                      ) : (
+                        <select
+                          required={moradoresDaUnidade.length > 1}
+                          className="w-full p-2 bg-white border border-blue-200 rounded-lg text-xs font-semibold text-slate-800"
+                          onChange={(e) => {
+                            const encontrado = moradoresDaUnidade.find(m => String(m.id) === String(e.target.value)) || null;
+                            setMoradorSelecionado(encontrado);
+                          }}
+                          value={moradorSelecionado?.id || ''}
+                        >
                           <option value="">-- Selecione o morador destinatário ({moradoresDaUnidade.length} na unidade) --</option>
-                        )}
-                        {moradoresDaUnidade.map(m => (
-                          <option key={m.id} value={m.id}>{m.nome} (Tel: {m.telefone || 'Sem tel'})</option>
-                        ))}
-                      </select>
+                          {moradoresDaUnidade.map(m => (
+                            <option key={m.id} value={m.id}>{m.nome} (Tel: {m.telefone || 'Sem tel'})</option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                   ) : (
                     <div className="p-2 rounded-xl border border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
@@ -6076,15 +6161,30 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
                 </div>
               </form>
 
-              {/* FEEDBACK & WHATSAPP APÓS REGISTRO */}
+              {/* FEEDBACK SEPARADO: ENCOMENDA SALVA vs WHATSAPP */}
               {itemTriadoWhats && (
                 <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl space-y-2">
-                  <div className="flex items-center gap-2 text-emerald-800">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                    <div>
-                      <p className="text-xs font-bold text-emerald-950">Pacote registrado com sucesso!</p>
-                      <p className="text-[11px] text-emerald-800">Notifique o morador {itemTriadoWhats.destinatario} pelo WhatsApp.</p>
+                  <div className="flex items-start justify-between gap-2 text-emerald-800">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                      <div>
+                        <p className="text-xs font-bold text-emerald-950">Encomenda salva no sistema</p>
+                        <p className="text-[11px] text-emerald-800">Destinatário: {itemTriadoWhats.destinatario}</p>
+                      </div>
                     </div>
+                    <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg border ${
+                      itemTriadoWhats.whatsappStatus === 'enviada'
+                        ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                        : itemTriadoWhats.whatsappStatus === 'falhou'
+                          ? 'bg-red-100 text-red-800 border-red-300'
+                          : 'bg-amber-100 text-amber-800 border-amber-300'
+                    }`}>
+                      {itemTriadoWhats.whatsappStatus === 'enviada'
+                        ? 'WhatsApp aberto'
+                        : itemTriadoWhats.whatsappStatus === 'falhou'
+                          ? 'WhatsApp falhou'
+                          : 'WhatsApp pendente'}
+                    </span>
                   </div>
                   <div className="flex gap-2 pt-1">
                     <a 
@@ -6093,7 +6193,7 @@ export default function Encomendas({ usuarioLogado }: EncomendasProps) {
                       rel="noreferrer" 
                       className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-xl text-xs font-bold flex justify-center items-center gap-1.5 transition shadow-xs"
                     >
-                      <MessageCircle className="w-4 h-4" /> Avisar no WhatsApp
+                      <MessageCircle className="w-4 h-4" /> {itemTriadoWhats.whatsappStatus === 'enviada' ? 'Reabrir WhatsApp' : 'Enviar no WhatsApp'}
                     </a>
                     <button 
                       type="button"

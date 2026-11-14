@@ -306,6 +306,7 @@ export default function Chaves({ usuarioLogado }: ChavesProps) {
       const { publicUrl, tamanhoOriginalKb, tamanhoComprimidoKb, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta,
+        condominioId: condId,
         maxWidth: 1000,
         maxHeight: 1000,
         qualidade: 0.75

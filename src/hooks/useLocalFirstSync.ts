@@ -157,7 +157,7 @@ export function useLocalFirstSync<T extends { id: any; condominio_id?: string; u
               return filtroCustomizado ? atualizada.filter(filtroCustomizado) : atualizada;
             });
           } else if (tipo === 'DELETE' && antigo) {
-            await excluirItemLocal(tabela, antigo.id);
+            await excluirItemLocal(tabela, antigo.id, (antigo as any).condominio_id || condominioId);
             setDados((prev) => prev.filter((it) => String(it.id) !== String(antigo.id)));
           }
         }

@@ -381,6 +381,7 @@ export async function efetivarBaixaCustodia(
 
   const payloadBaixa: any = {
     id: dados.id,
+    condominio_id: dados.condominio_id,
     status: 'Retirado',
     data_hora_saida: agoraIso,
     recebedor_nome: dados.recebedor_nome.trim(),
@@ -435,11 +436,12 @@ export async function efetivarBaixaCustodia(
         throw new Error(rpcRes.erro || 'Falha na validação transacional do item.');
       }
     } else {
-      // 2. Fallback direto atômico via query update com guarda de concorrência
+      // 2. Fallback direto atômico via query update com guarda de concorrência e tenant
       const { error: updateErr } = await supabase
         .from('custodia')
         .update(payloadBaixa)
         .eq('id', dados.id)
+        .eq('condominio_id', dados.condominio_id)
         .in('status', STATUS_PENDENTES);
 
       if (updateErr) throw updateErr;

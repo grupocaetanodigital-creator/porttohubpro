@@ -123,6 +123,7 @@ export default function Materiais({ usuarioLogado }: MateriaisProps) {
       const { publicUrl, tamanhoOriginalKb, tamanhoComprimidoKb, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta: 'materiais_equipamentos',
+        condominioId: condId,
         maxWidth: 1000,
         maxHeight: 1000,
         qualidade: 0.8
@@ -147,6 +148,7 @@ export default function Materiais({ usuarioLogado }: MateriaisProps) {
       const { publicUrl, tamanhoOriginalKb, tamanhoComprimidoKb, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta: 'avarias_materiais',
+        condominioId: condId,
         maxWidth: 1000,
         maxHeight: 1000,
         qualidade: 0.75
@@ -182,6 +184,7 @@ export default function Materiais({ usuarioLogado }: MateriaisProps) {
       const { publicUrl, tamanhoOriginalKb, tamanhoComprimidoKb, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta: 'materiais_status',
+        condominioId: condId,
         maxWidth: 1000,
         maxHeight: 1000,
         qualidade: 0.8

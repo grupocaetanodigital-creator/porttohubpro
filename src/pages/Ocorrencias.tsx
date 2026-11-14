@@ -171,6 +171,7 @@ export default function Ocorrencias({ usuarioLogado }: OcorrenciasProps) {
       const { publicUrl, tamanhoOriginalKb, tamanhoComprimidoKb, taxaReducaoPct } = await uploadFotoComprimidaStorage({
         file,
         pasta: 'ocorrencias',
+        condominioId: condId,
         maxWidth: 1000,
         maxHeight: 1000,
         qualidade: 0.75

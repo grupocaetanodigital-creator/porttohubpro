@@ -402,6 +402,13 @@ export async function inserirEncomendasValidadas(
   const validacoes: ValidacaoDestinatarioResultado[] = [];
   const payloadsValidados: any[] = [];
 
+  const gerarOperationId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `op_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+  };
+
   for (let i = 0; i < pacotes.length; i++) {
     const pkt = pacotes[i];
     if (pkt.condominio_id && String(pkt.condominio_id) !== String(condominioId)) {
@@ -425,6 +432,7 @@ export async function inserirEncomendasValidadas(
     validacoes.push(resVal);
     payloadsValidados.push({
       ...pkt,
+      operation_id: pkt.operation_id || gerarOperationId(),
       condominio_id: condominioId,
       morador_id: resVal.moradorId,
       destinatario: resVal.morador?.nome || null
@@ -438,25 +446,32 @@ export async function inserirEncomendasValidadas(
     try {
       let { data: itensInseridos, error: itemErr } = await supabase
         .from('encomendas_itens')
-        .insert(payloadsValidados)
+        .upsert(payloadsValidados, { onConflict: 'operation_id', ignoreDuplicates: true })
         .select();
 
       if (
         itemErr &&
-        (itemErr.message?.includes('local_armazenamento') ||
+        (itemErr.message?.includes('operation_id') ||
+          itemErr.message?.includes('on conflict') ||
+          itemErr.message?.includes('local_armazenamento') ||
           itemErr.message?.includes('destinatario') ||
           (itemErr as any).code === '42703' ||
+          (itemErr as any).code === '42P10' ||
           itemErr.message?.includes('schema cache'))
       ) {
-        const compatPayloads = payloadsValidados.map(({ local_armazenamento, destinatario, ...rest }) => {
-          if (itemErr?.message?.includes('destinatario') && !itemErr?.message?.includes('local_armazenamento')) {
-            return { ...rest, local_armazenamento };
-          }
-          if (itemErr?.message?.includes('local_armazenamento') && !itemErr?.message?.includes('destinatario')) {
-            return { ...rest, destinatario };
-          }
-          return rest;
+        const msgErr = itemErr.message || '';
+        const faltaOpId = msgErr.includes('operation_id') || msgErr.includes('on conflict') || (itemErr as any).code === '42P10';
+        const faltaLocal = msgErr.includes('local_armazenamento');
+        const faltaDest = msgErr.includes('destinatario');
+
+        const compatPayloads = payloadsValidados.map(({ local_armazenamento, destinatario, operation_id, ...rest }) => {
+          const obj: any = { ...rest };
+          if (!faltaOpId && operation_id) obj.operation_id = operation_id;
+          if (!faltaLocal && local_armazenamento !== undefined) obj.local_armazenamento = local_armazenamento;
+          if (!faltaDest && destinatario !== undefined) obj.destinatario = destinatario;
+          return obj;
         });
+
         const retry = await supabase.from('encomendas_itens').insert(compatPayloads).select();
         itemErr = retry.error;
         itensInseridos = retry.data;

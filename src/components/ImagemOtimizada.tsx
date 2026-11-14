@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ImageIcon, ZoomIn, RefreshCw, X, Download } from 'lucide-react';
 import { obterImagemCacheada, salvarImagemCache } from '../services/imageCacheService';
+import { resolverUrlFotoPrivada } from '../services/imageUtils';
 
 interface ImagemOtimizadaProps extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, 'src'> {
   src?: string | null;
@@ -14,11 +15,10 @@ interface ImagemOtimizadaProps extends Omit<React.ImgHTMLAttributes<HTMLImageEle
 
 /**
  * Componente de Imagem de Alta Performance para Cards & Portaria:
+ * - Resolve caminhos e URLs privadas via Signed URLs do Supabase Storage.
  * - Lazy Loading Nativo (loading="lazy", decoding="async").
  * - Shimmer Skeleton enquanto carrega.
- * - Cache local em CacheStorage para acesso 100% offline.
  * - Modal de Ampliação em Tela Cheia ao clicar.
- * - Tratamento resiliente de erro sem travar a interface.
  */
 export const ImagemOtimizada: React.FC<ImagemOtimizadaProps> = ({
   src,
@@ -55,19 +55,23 @@ export const ImagemOtimizada: React.FC<ImagemOtimizadaProps> = ({
     setCarregando(true);
     setErro(false);
 
-    // 1. Tenta recuperar imagem do CacheStorage local para carregamento instantâneo
     let cancelado = false;
-    obterImagemCacheada(src).then((cachedBlobUrl) => {
+    (async () => {
+      const resolved = await resolverUrlFotoPrivada(src);
       if (cancelado || !montadoRef.current) return;
+
+      const cachedBlobUrl = await obterImagemCacheada(resolved);
+      if (cancelado || !montadoRef.current) return;
+
       if (cachedBlobUrl) {
         setUrlEfetiva(cachedBlobUrl);
         setEmCacheLocal(true);
         setCarregando(false);
       } else {
-        setUrlEfetiva(src);
+        setUrlEfetiva(resolved);
         setEmCacheLocal(false);
       }
-    });
+    })();
 
     return () => {
       cancelado = true;
@@ -77,9 +81,8 @@ export const ImagemOtimizada: React.FC<ImagemOtimizadaProps> = ({
   const handleLoadSucesso = () => {
     setCarregando(false);
     setErro(false);
-    // Salva no CacheStorage para permitir acesso offline futuro
-    if (src && !emCacheLocal) {
-      salvarImagemCache(src);
+    if (urlEfetiva && !emCacheLocal) {
+      salvarImagemCache(urlEfetiva);
     }
   };
 
@@ -88,11 +91,15 @@ export const ImagemOtimizada: React.FC<ImagemOtimizadaProps> = ({
     setErro(true);
   };
 
-  const tentarRecarregar = (e: React.MouseEvent) => {
+  const tentarRecarregar = async (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!src) return;
     setErro(false);
     setCarregando(true);
-    setUrlEfetiva(src ? `${src}${src.includes('?') ? '&' : '?'}retry=${Date.now()}` : null);
+    const fresh = await resolverUrlFotoPrivada(src, true);
+    if (montadoRef.current) {
+      setUrlEfetiva(fresh || `${src}${src.includes('?') ? '&' : '?'}retry=${Date.now()}`);
+    }
   };
 
   if (!src || erro) {
