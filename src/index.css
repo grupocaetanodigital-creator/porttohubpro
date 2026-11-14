@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
+/* =========================================================================
+   REGRA INEGOCIÁVEL DE ACESSIBILIDADE E ALTO CONTRASTE (PORTTOHUB):
+   EM TODO E QUALQUER CAMPO DIGITÁVEL (INPUT, TEXTAREA, SELECT):
+   - FUNDO OBRIGATORIAMENTE BRANCO (#ffffff)
+   - FONTE/TEXTO OBRIGATORIAMENTE PRETA (#000000 / #0f172a)
+   Mesmo em Modo Escuro ou Modo Claro.
+   ========================================================================= */
+input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="range"]):not([type="color"]),
+textarea,
+select {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border-color: #cbd5e1;
+}
+
+/* Modo escuro: mantém rigorosamente fundo branco e texto preto com borda nítida */
+.dark input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="range"]):not([type="color"]),
+.dark textarea,
+.dark select,
+[data-theme="dark"] input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="range"]):not([type="color"]),
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border-color: #94a3b8 !important;
+}
+
+/* Placeholders de alta legibilidade cinza escuro */
+input::placeholder,
+textarea::placeholder,
+.dark input::placeholder,
+.dark textarea::placeholder,
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder {
+  color: #475569 !important;
+  opacity: 1 !important;
+}
+
+/* Opções de menus dropdown/select sempre brancas com texto preto */
+select option {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+}
+
+@keyframes pulseOrangeCard {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.7), 0 10px 20px -3px rgba(249, 115, 22, 0.3);
+    border-color: #f97316;
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(249, 115, 22, 0.25), 0 20px 25px -5px rgba(249, 115, 22, 0.5);
+    border-color: #fb923c;
+  }
+}
+
+@keyframes pulseRedCard {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7), 0 10px 20px -3px rgba(239, 68, 68, 0.3);
+    border-color: #ef4444;
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0.25), 0 20px 25px -5px rgba(239, 68, 68, 0.5);
+    border-color: #f87171;
+  }
+}
+
+.card-piscar-laranja {
+  animation: pulseOrangeCard 1.6s infinite ease-in-out;
+}
+
+.card-piscar-vermelho {
+  animation: pulseRedCard 1.5s infinite ease-in-out;
+}
